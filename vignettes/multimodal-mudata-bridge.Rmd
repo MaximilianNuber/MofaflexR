@@ -1,0 +1,422 @@
+---
+title: "Bridging Single-Cell Multi-Omics: SCE and MAE to Python MuData"
+author: "Maximilian Nuber"
+date: "`r Sys.Date()`"
+output:
+  BiocStyle::html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    fig_width: 7
+    fig_height: 5
+vignette: >
+  %\VignetteIndexEntry{Bridging Single-Cell Multi-Omics: SCE and MAE to Python MuData}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse   = TRUE,
+  comment    = "#>",
+  fig.align  = "center",
+  message    = FALSE,
+  warning    = FALSE
+)
+```
+
+# Introduction
+
+**MofaflexR** provides zero-copy bridges between Bioconductor single-cell
+objects and the Python `mudata` / `anndata` ecosystem. This vignette
+demonstrates:
+
+1. **`sce_to_reticulate_mudata()`**: Convert a
+   `SingleCellExperiment` – with alternative experiments (altExps) encoding
+   additional modalities such as surface-protein (ADT/CITE-seq) or
+   chromatin-accessibility (ATAC) – into a `ReticulateMuData`.
+
+2. **`mae_to_reticulate_mudata()`**: Convert a `MultiAssayExperiment` with
+   multiple experiments into a `ReticulateMuData`.
+
+3. **`ReticulateMuData` active bindings and methods**: Access Python MuData
+   fields directly from R without any data copies.
+
+All matrix transfers are **zero-copy**: R `dgCMatrix` objects are shared with
+Python through `scipy.sparse.csc_matrix` pointers. No Python ↔ R
+serialisation takes place unless you explicitly call `reticulate::py_to_r()`.
+
+## Prerequisites
+
+```{r check-env, eval = FALSE}
+# Ensure the mofaflex_test conda environment is available (or your own)
+reticulate::use_condaenv("mofaflex_test", required = TRUE)
+
+# Or configure via ~/.Renviron:
+#   RETICULATE_PYTHON=/path/to/python
+```
+
+```{r load-packages}
+suppressPackageStartupMessages({
+  library(MofaflexR)
+  library(SingleCellExperiment)
+  library(SummarizedExperiment)
+  library(Matrix)
+  library(S4Vectors)
+})
+```
+
+---
+
+# Synthetic CITE-seq Dataset
+
+We construct a minimal **CITE-seq** dataset that faithfully mimics real
+single-cell data: 300 cells, 1 000 genes (RNA), and 40 surface proteins (ADT).
+
+```{r synthetic-data}
+set.seed(42)
+
+n_cells    <- 300L
+n_genes    <- 1000L
+n_proteins <- 40L
+
+cell_ids    <- paste0("cell_",    seq_len(n_cells))
+gene_ids    <- paste0("gene_",    seq_len(n_genes))
+protein_ids <- paste0("protein_", seq_len(n_proteins))
+
+# ---- RNA counts (sparse, ~5% density) -----------------------------------
+rna_mat <- Matrix::rsparsematrix(
+  nrow    = n_genes,
+  ncol    = n_cells,
+  density = 0.05,
+  repr    = "C"
+)
+rna_mat <- round(abs(rna_mat) * 100)   # non-negative integer counts
+rownames(rna_mat) <- gene_ids
+colnames(rna_mat) <- cell_ids
+
+# ---- ADT / protein counts (~50% density, lower diversity) ---------------
+adt_mat <- Matrix::rsparsematrix(
+  nrow    = n_proteins,
+  ncol    = n_cells,
+  density = 0.50,
+  repr    = "C"
+)
+adt_mat <- round(abs(adt_mat) * 500)
+rownames(adt_mat) <- protein_ids
+colnames(adt_mat) <- cell_ids
+
+# ---- Main SCE (RNA) -----------------------------------------------------
+cell_types <- sample(c("CD4_T", "CD8_T", "B_cell", "Monocyte", "NK"),
+                     n_cells, replace = TRUE)
+batches    <- sample(c("batch1", "batch2"), n_cells, replace = TRUE)
+
+sce <- SingleCellExperiment(
+  assays  = list(counts = rna_mat),
+  colData = DataFrame(
+    cell_type = cell_types,
+    batch     = batches,
+    n_counts  = Matrix::colSums(rna_mat)
+  ),
+  rowData = DataFrame(
+    gene_length = sample(500:5000, n_genes, replace = TRUE),
+    highly_variable = sample(c(TRUE, FALSE), n_genes,
+                             replace = TRUE, prob = c(0.1, 0.9))
+  )
+)
+
+# ---- ADT altExp --------------------------------------------------------
+adt_sce <- SingleCellExperiment(
+  assays  = list(counts = adt_mat),
+  rowData = DataFrame(
+    isotype = sample(c("IgG", "IgM", "IgA"), n_proteins, replace = TRUE)
+  )
+)
+
+SingleCellExperiment::altExp(sce, "adt") <- adt_sce
+
+sce
+```
+
+```{r show-sce}
+cat("Main SCE dimensions  : ", dim(sce)[1], "genes x", dim(sce)[2], "cells\n")
+cat("altExp names         : ", altExpNames(sce), "\n")
+cat("ADT dimensions       : ", dim(altExp(sce, "adt")), "\n")
+```
+
+---
+
+# SCE → ReticulateMuData
+
+## Convert with `sce_to_reticulate_mudata()`
+
+`sce_to_reticulate_mudata()` maps the main SCE to one modality and each
+`altExp` to its own modality. The conversion is **zero-copy**: all sparse
+matrices remain in their original R memory locations.
+
+```{r sce-to-mudata}
+mdata <- sce_to_reticulate_mudata(
+  x             = sce,
+  main_modality = "rna",
+  assay         = "counts",
+  altexp_assay  = "counts"
+)
+mdata
+```
+
+`mdata` is a thin R6 proxy around a Python `mudata.MuData` object. All data
+live in Python; R just holds a pointer.
+
+## Active bindings – access Python fields directly
+
+### `$shape` – dimensions
+
+```{r shape}
+mdata$shape          # c(n_obs, n_vars_total)
+```
+
+### `$obs_names` – shared observation names
+
+```{r obs-names}
+head(mdata$obs_names, 10)
+length(mdata$obs_names)
+```
+
+### `$var_names` – all variable names
+
+```{r var-names}
+head(mdata$var_names, 6)
+tail(mdata$var_names, 6)   # protein names appear at the end
+```
+
+### `$obs` – global observation metadata
+
+After construction, `mudata.MuData` automatically pulls observation-level
+metadata from the individual modalities into the global `obs` table.
+
+```{r obs}
+str(mdata$obs)
+head(mdata$obs)
+```
+
+### `$mod` – extracted modalities
+
+The `$mod` active binding returns a named R list of
+`anndataR::ReticulateAnnData` wrappers.
+
+```{r mod}
+names(mdata$mod)
+rna_adata <- mdata$mod$rna
+rna_adata
+```
+
+Or equivalently using `[[`:
+
+```{r bracket}
+adt_adata <- mdata[["adt"]]
+adt_adata
+```
+
+Both wrappers remain zero-copy: they point to the same Python `AnnData` objects
+that are held inside the `MuData`.
+
+### `$obsm` – multi-dimensional observation annotations
+
+The `obsm` slot is empty initially; we add a synthetic PCA embedding to
+illustrate the round-trip.
+
+```{r obsm-assign}
+# Create a synthetic PCA result (cells × 10 PCs)
+pca_result <- matrix(rnorm(n_cells * 10), nrow = n_cells, ncol = 10,
+                     dimnames = list(cell_ids, paste0("PC", 1:10)))
+
+# Store directly via the Python AnnData binding
+rna_adata$obsm[["X_pca"]] <- pca_result
+rna_adata$obsm_keys()
+```
+
+After adding embeddings to a modality, call `mdata$update_obs()` to
+synchronise the global obs index:
+
+```{r update-obs}
+mdata$update_obs()
+cat("Global n_obs after update:", mdata$n_obs(), "\n")
+```
+
+### obs / var key introspection
+
+```{r key-introspection}
+mdata$obs_keys()     # global obs column names
+mdata$var_keys()     # global var column names (if any)
+mdata$uns_keys()     # unstructured annotation (empty here)
+```
+
+---
+
+## Python method forwarding
+
+Any Python `MuData` method can be called directly from R via `$<method>()`. 
+The return value is automatically wrapped when appropriate.
+
+### `$copy()` – deep copy
+
+```{r copy}
+mdata_copy <- mdata$copy()
+inherits(mdata_copy, "ReticulateMuData")   # TRUE
+identical(mdata_copy$py_mudata(), mdata$py_mudata())   # FALSE – new object
+```
+
+### `$update()` – sync global obs / var from modalities
+
+```{r update}
+mdata$update()
+mdata$n_obs()
+mdata$n_vars()
+```
+
+### `$py_call()` – generic Python method with auto-wrapping
+
+```{r py-call}
+# Any Python method not directly surfaced as an R method can be called via
+# py_call().  The return is auto-wrapped into ReticulateMuData / ReticulateAnnData
+# when applicable.
+result <- mdata$py_call("copy")
+class(result)
+```
+
+---
+
+# MultiAssayExperiment → ReticulateMuData
+
+## Construct a tiny MAE
+
+```{r mae-build}
+library(MultiAssayExperiment)
+
+# Reuse the same RNA and protein matrices from above
+sce_rna <- SingleCellExperiment(
+  assays  = list(counts = rna_mat),
+  colData = DataFrame(cell_type = cell_types, batch = batches)
+)
+
+sce_adt <- SingleCellExperiment(
+  assays  = list(counts = adt_mat)
+)
+
+# Sample map: each experiment has identical primary ↔ colname
+make_sm <- function(primary, colname, assay) {
+  DataFrame(assay = assay, primary = primary, colname = colname)
+}
+
+smap <- rbind(
+  make_sm(cell_ids, cell_ids, "rna"),
+  make_sm(cell_ids, cell_ids, "adt")
+)
+
+col_df <- DataFrame(
+  donor     = sample(paste0("donor_", 1:3), n_cells, replace = TRUE),
+  row.names = cell_ids
+)
+
+mae <- MultiAssayExperiment(
+  experiments = ExperimentList(rna = sce_rna, adt = sce_adt),
+  colData     = col_df,
+  sampleMap   = smap
+)
+
+mae
+```
+
+## Convert with `mae_to_reticulate_mudata()`
+
+```{r mae-to-mudata}
+mdata_mae <- mae_to_reticulate_mudata(mae, assay = "counts")
+mdata_mae
+```
+
+```{r mae-inspect}
+mdata_mae$modality_names()
+mdata_mae$n_obs()
+mdata_mae$n_vars()
+
+# Check that MAE colData was propagated to global obs
+str(mdata_mae$obs)
+```
+
+```{r mae-modalities}
+rna_from_mae <- mdata_mae[["rna"]]
+adt_from_mae <- mdata_mae[["adt"]]
+
+cat("RNA modality: ", rna_from_mae$n_obs(), "obs x", rna_from_mae$n_vars(), "vars\n")
+cat("ADT modality: ", adt_from_mae$n_obs(), "obs x", adt_from_mae$n_vars(), "vars\n")
+```
+
+---
+
+# Real Dataset Examples (Optional)
+
+The demonstrations above use synthetic data so the vignette renders offline
+and instantly.  For a real CITE-seq workflow, replace the synthetic setup with
+any SCE that has an ADT altExp.  Below is a sketch using the `scRNAseq`
+package:
+
+```{r real-dataset, eval = FALSE}
+# ---- Using a real scRNAseq dataset ----------------------------------------
+# Many scRNAseq datasets include altExps for spike-ins or protein panels.
+# Example: Zilionis et al. mouse lung data (has ercc altExp)
+#
+# library(scRNAseq)
+# sce_lung <- ZilionisLungData("mouse")
+# altExpNames(sce_lung)   # check for altExps
+#
+# # Convert to MuData (use first assay of each altExp automatically)
+# mdata_lung <- sce_to_reticulate_mudata(
+#   x             = sce_lung,
+#   main_modality = "rna",
+#   assay         = "counts"
+# )
+# mdata_lung
+```
+
+For a `MultiAssayExperiment` from a real experiment:
+
+```{r mae-real, eval = FALSE}
+# ---- Using a MultiAssayExperiment from curatedTCGAData --------------------
+# library(curatedTCGAData)
+# mae_brca <- curatedTCGAData("BRCA",
+#                             assays = c("RNASeq2GeneNorm", "miRNASeqGene"),
+#                             dry.run = FALSE)
+#
+# mdata_brca <- mae_to_reticulate_mudata(mae_brca)
+# mdata_brca$modality_names()
+```
+
+---
+
+# Interoperability Round-trip
+
+The `ReticulateMuData` object can be passed directly to any Python function
+that accepts a `MuData` via its `.py_mudata()` raw accessor:
+
+```{r py-round-trip, eval = FALSE}
+# ---- Pass directly to Python code -----------------------------------------
+mu <- reticulate::import("mudata", convert = FALSE)
+
+# Write to h5mu
+mu$write_h5mu(mdata$py_mudata(), "/tmp/my_mdata.h5mu")
+
+# Read back – returns a Python MuData
+py_loaded  <- mu$read_h5mu("/tmp/my_mdata.h5mu")
+mdata_back <- ReticulateMuData$new(py_loaded)
+
+mdata_back$obs_names
+mdata_back$shape
+```
+
+---
+
+# Session Info
+
+```{r sessioninfo}
+sessionInfo()
+```

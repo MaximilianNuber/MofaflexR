@@ -1,0 +1,14 @@
+# MofaflexR: Fit MOFAFlex Models from R via basilisk and reticulate
+
+Provides an R interface to the MOFAFlex Python package for multi-omics
+factor analysis. Core functionality includes zero-copy conversion of
+SingleCellExperiment assays (stored as Matrix::dgCMatrix) to
+scipy.sparse.csc_matrix Python objects, wrapping of the resulting
+AnnData in an anndataR::ReticulateAnnData, and a ReticulateMuData R6
+wrapper around Python mudata.MuData objects. The Python environment is
+managed automatically via basilisk, requiring no manual Python
+installation.
+
+## Author
+
+**Maintainer**: MofaflexR Author <author@example.com>

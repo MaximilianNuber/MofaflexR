@@ -1,0 +1,31 @@
+.Rproj.user
+.Rhistory
+.RData
+.httr-oauth
+.DS_Store
+.env
+
+# Build artefacts
+*.o
+*.so
+*.rdb
+*.rdx
+*.h5ad
+*.hdf5
+
+# Installed package
+inst/doc/
+man/*.Rd.bak
+
+# Tests coverage
+coverage/
+
+# R CMD check
+*.Rcheck/
+
+# Vignette build artefacts
+vignettes/*.html
+vignettes/*.pdf
+
+/doc/
+/Meta/

@@ -1,0 +1,115 @@
+# Zero-copy sparse bridge: SingleCellExperiment → scipy.sparse → AnnData
+
+## Overview
+
+This vignette explains how **MofaflexR** converts a
+`SingleCellExperiment` (SCE) assay stored as a `Matrix::dgCMatrix` into
+a Python `scipy.sparse.csc_matrix` — without copying the underlying data
+arrays — and then wraps it in an `anndata.AnnData` object accessible
+from R via
+[`anndataR::ReticulateAnnData`](https://anndataR.scverse.org/reference/ReticulateAnnData.html).
+
+## Motivation
+
+Single-cell RNA-seq count matrices can contain tens of millions of
+non-zero entries. Copying such matrices at the R ↔︎ Python boundary
+wastes both memory and time. MofaflexR avoids this by using
+[`reticulate::np_array()`](https://rstudio.github.io/reticulate/reference/np_array.html),
+which exposes R’s contiguous memory to NumPy via the **C buffer
+protocol** without allocating new heap storage.
+
+## Background: dgCMatrix memory layout
+
+A `dgCMatrix` with *m* genes (rows) and *n* cells (columns) stores:
+
+| Slot | Content                                                        | Length  | R type                      |
+|------|----------------------------------------------------------------|---------|-----------------------------|
+| `@x` | non-zero values (column-major)                                 | `nnz`   | `numeric` (double, 8 bytes) |
+| `@i` | row indices of each `@x` entry (0-based)                       | `nnz`   | `integer` (int32, 4 bytes)  |
+| `@p` | column pointer: `@p[j]` = index into `@x` where col `j` starts | `n + 1` | `integer` (int32, 4 bytes)  |
+
+This is exactly the CSC (Compressed Sparse Column) format used by
+`scipy.sparse.csc_matrix`.
+
+## How `sce_assay_to_scipy_csc()` works
+
+``` r
+# Pseudocode (simplified)
+sp         <- reticulate::import("scipy.sparse", convert = FALSE)
+py_data    <- reticulate::np_array(mat@x, dtype = "float64")  # no copy
+py_indices <- reticulate::np_array(mat@i, dtype = "int32")    # no copy
+py_indptr  <- reticulate::np_array(mat@p, dtype = "int32")    # no copy
+shape      <- reticulate::tuple(nr, nc)
+csc        <- sp$csc_matrix(reticulate::tuple(py_data, py_indices, py_indptr),
+                             shape = shape)
+```
+
+[`reticulate::np_array()`](https://rstudio.github.io/reticulate/reference/np_array.html)
+uses the C buffer protocol to hand a pointer to the existing R memory to
+NumPy. The resulting arrays have `flags.owndata == False`, confirming
+they are views, not copies.
+
+## Orientation: why we transpose
+
+`dgCMatrix` is genes × cells (R convention: rows are features). AnnData
+uses obs × vars = cells × genes. We call `csc.T` after construction:
+
+``` python
+# csc.T is a csr_matrix of shape (cells, genes)
+# scipy computes this by swapping the CSC ↔ CSR interpretation;
+# no values are re-ordered — flags.owndata remains False.
+```
+
+## What CAN force a copy
+
+| Trigger                             | Reason                                      |
+|-------------------------------------|---------------------------------------------|
+| Assay is not `dgCMatrix` on entry   | `as(mat, "dgCMatrix")` may allocate         |
+| `py_to_r(adata$X)`                  | reticulate converts sparse → dense R matrix |
+| `adata.X.toarray()` in Python       | explicit densification                      |
+| Pandas `DataFrame` for obs/var      | unavoidable: R `data.frame` → Python copy   |
+| `scipy.sparse.csc_array` conversion | `.tocsc()` sorts & may copy indices         |
+
+## Lifetime caveat
+
+The Python `csc_matrix` holds a **borrowed pointer** to R memory.
+Ensure:
+
+1.  The source `dgCMatrix` remains alive (referenced by R) while Python
+    uses it.
+2.  No R code triggers copy-on-modify for the same vector.
+3.  The R garbage collector has not freed the object.
+
+In typical single-session usage (SCE → AnnData → model fit → result back
+to R) this is always satisfied.
+
+## Example
+
+``` r
+library(MofaflexR)
+library(SingleCellExperiment)
+library(Matrix)
+
+set.seed(1)
+counts <- rsparsematrix(500, 100, density = 0.05, repr = "C")
+counts <- abs(round(counts))
+sce    <- SingleCellExperiment(assays = list(counts = counts))
+colnames(sce) <- paste0("cell", seq_len(ncol(sce)))
+rownames(sce) <- paste0("gene", seq_len(nrow(sce)))
+
+# --- zero-copy CSC matrix (genes x cells) ---
+csc <- sce_assay_to_scipy_csc(sce)
+cat("owndata:", reticulate::py_to_r(csc$data$flags$owndata), "\n")
+# owndata: FALSE
+
+# --- full AnnData (cells x genes) ---
+rada     <- sce_to_reticulate_anndata(sce)
+py_adata <- rada$py_anndata()
+sp       <- reticulate::import("scipy.sparse", convert = FALSE)
+cat("Shape:   ", unlist(reticulate::py_to_r(py_adata$shape)), "\n")
+cat("Sparse:  ", reticulate::py_to_r(sp$issparse(py_adata$X)), "\n")
+cat("owndata: ", reticulate::py_to_r(py_adata$X$data$flags$owndata), "\n")
+# Shape:    100 500
+# Sparse:   TRUE
+# owndata:  FALSE
+```

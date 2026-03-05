@@ -1,0 +1,45 @@
+Package: MofaflexR
+Title: Fit MOFAFlex Models from R via basilisk and reticulate
+Version: 0.0.1
+Authors@R:
+    person("MofaflexR", "Author", email = "author@example.com", role = c("aut", "cre"))
+Description:
+    Provides an R interface to the MOFAFlex Python package for multi-omics
+    factor analysis. Core functionality includes zero-copy conversion of
+    SingleCellExperiment assays (stored as Matrix::dgCMatrix) to
+    scipy.sparse.csc_matrix Python objects, wrapping of the resulting
+    AnnData in an anndataR::ReticulateAnnData, and a ReticulateMuData R6
+    wrapper around Python mudata.MuData objects. The Python environment is
+    managed automatically via basilisk, requiring no manual Python installation.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.3
+biocViews: SingleCell, DataImport, Software
+Imports:
+    methods,
+    Matrix,
+    R6,
+    SingleCellExperiment,
+    SummarizedExperiment,
+    reticulate,
+    basilisk,
+    basilisk.utils,
+    anndataR
+Suggests:
+    testthat (>= 3.0.0),
+    knitr,
+    rmarkdown,
+    S4Vectors,
+    MultiAssayExperiment,
+    scRNAseq,
+    muscData,
+    scran,
+    scuttle,
+    scanpy,
+    ggplot2,
+    MOFA2,
+    rhdf5,
+    BiocStyle
+Config/testthat/edition: 3
+VignetteBuilder: knitr

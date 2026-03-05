@@ -1,0 +1,282 @@
+---
+title: "Kang IFN-β PBMC: MOFA-FLEX from R to MOFA2"
+author: "Maximilian Nuber"
+date: "`r Sys.Date()`"
+output:
+  BiocStyle::html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+vignette: >
+  %\VignetteIndexEntry{Kang IFN-β PBMC: MOFA-FLEX from R to MOFA2}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+    collapse = TRUE,
+    comment  = "#>",
+    eval     = TRUE # heavy analysis; set eval=TRUE to run end-to-end
+)
+```
+
+# Overview
+
+This vignette demonstrates an end-to-end MOFA-FLEX workflow entirely in R:
+
+1. **Load** the Kang et al. (2018) PBMC IFN-β stimulation dataset from
+   `muscData`.
+2. **Preprocess** with standard Bioconductor tools (scran / scuttle).
+3. **Bridge** the resulting `SingleCellExperiment` into a Python `AnnData`
+   via `sce_to_reticulate_anndata()`.
+4. **Train** a MOFA-FLEX model with `fit_mofaflex()`, saving the model to
+   an HDF5 file compatible with MOFA2.
+5. **Load** the saved model in the MOFA2 R package for downstream analysis.
+
+## Required packages
+
+```{r packages, message=FALSE, warning=FALSE}
+# Bioconductor
+library(muscData) # BiocManager::install("muscData")
+library(scuttle) # BiocManager::install("scuttle")
+library(scran) # BiocManager::install("scran")
+library(SingleCellExperiment)
+
+# MofaflexR (this package)
+library(MofaflexR)
+
+# Downstream — MOFA2
+library(MOFA2) # BiocManager::install("MOFA2")
+```
+
+---
+
+# Load data {#load}
+
+`muscData::Kang18_8vs8()` provides 29,065 PBMCs from eight donors, each
+split into a control and an IFN-β–stimulated condition (8 × 2 = 16 samples).
+
+```{r load-data}
+sce_full <- Kang18_8vs8()
+sce_full
+```
+
+```
+# class: SingleCellExperiment
+# dim: 35,635 genes × 29,065 cells
+# colData names: ind, stim, cluster, cell, multiplets
+```
+
+---
+
+# Preprocess {#preprocess}
+
+## Quality-control filtering
+
+Remove multiplets and low-quality cells before normalisation.
+
+```{r qc}
+## Remove multiplets and cells without an assigned cell type
+sce <- sce_full[, sce_full$multiplets == "singlet" & !is.na(sce_full$cell)]
+
+## Keep cells with ≥ 200 detected genes
+qc <- scuttle::perCellQCMetrics(sce)
+sce <- sce[, qc$detected >= 200]
+
+cat(sprintf("After QC: %d genes × %d cells\n", nrow(sce), ncol(sce)))
+```
+
+## Normalisation
+
+Log-normalise using pooling-based size factors from scran.
+
+```{r normalise}
+set.seed(42)
+# clusters <- scran::quickCluster(sce)
+# sce      <- scran::computeSumFactors(sce, clusters = clusters)
+sce <- scuttle::logNormCounts(sce)
+
+assayNames(sce) # should include "logcounts"
+```
+
+## Select highly variable genes
+
+Retain the 3,000 most variable genes to keep the model tractable.
+
+```{r hvgs}
+dec <- scran::modelGeneVar(sce)
+hvgs <- scran::getTopHVGs(dec, n = 3000)
+sce_hvg <- sce[hvgs, ]
+
+cat(sprintf("Using %d HVGs from %d cells.\n", nrow(sce_hvg), ncol(sce_hvg)))
+```
+
+---
+
+# Convert to AnnData {#anndata}
+
+`sce_to_reticulate_anndata()` builds a Python `AnnData` from the SCE without
+copying the underlying sparse matrix (zero-copy bridge). All `colData` columns
+are forwarded to `adata.obs`.
+
+```{r convert}
+adata <- sce_to_reticulate_anndata(
+    sce_hvg,
+    assay = "logcounts"
+)
+adata
+```
+
+The `stim` column in `adata$obs` (`"ctrl"` / `"stim"`) will be used by
+MOFA-FLEX to split cells into two groups.
+
+---
+
+# Train a MOFA-FLEX model {#train}
+
+Key choices:
+
+* `group_by = "stim"` — split cells into **ctrl** and **stim** groups using
+  the `stim` column in `obs`.
+* `subset_var = NULL` — HVGs were already selected; skip the
+  `highly_variable` filter.
+* `save_path` — write the trained model to an HDF5 file.
+* `mofa_compat = "full"` — save in MOFA2-readable format.
+* View name will be **`rna`** (automatic when wrapping a single AnnData).
+
+```{r train}
+## Output path — adjust to a stable directory in your project
+output_dir <- file.path("results", "mofaflex")
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+model_path <- file.path(output_dir, "kang_mofaflex.hdf5")
+model <- fit_mofaflex(
+    data = adata,
+    data_options = list(
+        # group_by           = "stim",
+        scale_per_group    = TRUE,
+        subset_var         = NULL,
+        plot_data_overview = FALSE
+    ),
+    model_options = list(
+        n_factors    = 5L,
+        weight_prior = "Horseshoe"
+    ),
+    training_options = list(
+        max_epochs             = 5000L,
+        early_stopper_patience = 50L,
+        seed                   = 42L,
+        device                 = "cuda",  # or "cpu" if no GPU is available
+        save_path              = model_path
+    ),
+    mofa_compat = "full"  # write a MOFA2-readable HDF5 file
+)
+```
+
+> **Compute time.** On a modern CPU this typically converges in a few minutes
+> thanks to early stopping.
+
+---
+
+# Load the model in MOFA2 {#mofa2}
+
+Because the model was saved with `mofa_compat = "full"`, the HDF5 file
+contains all MOFA2-compatible weight and factor matrices.  Use the
+`load_mofaflex_model()` wrapper (which handles minor HDF5-format differences
+between **mofaflex** and MOFA2 automatically) to load it.
+
+```{r mofa2-load}
+mofa <- load_mofaflex_model(model_path)
+
+## Attach sample metadata so colour_by aesthetics work.
+## MOFA2 requires a 'sample' column matching the model's cell IDs.
+cells_per_group <- MOFA2::samples_names(mofa)
+meta <- do.call(rbind, lapply(names(cells_per_group), function(grp) {
+    cells <- cells_per_group[[grp]]
+    sdf <- as.data.frame(SummarizedExperiment::colData(sce_hvg)[cells, , drop = FALSE])
+    data.frame(
+        sample = cells, group = grp, sdf,
+        check.names = FALSE, stringsAsFactors = FALSE
+    )
+}))
+MOFA2::samples_metadata(mofa) <- meta
+mofa
+```
+
+## Variance explained
+
+```{r mofa2-r2, fig.cap="Variance explained per factor and group."}
+MOFA2::plot_variance_explained(mofa, max_r2 = 0.1)
+```
+
+## Factor scores
+
+```{r mofa2-factors, fig.cap="Factor scores coloured by stimulation condition."}
+MOFA2::plot_factor(
+    mofa,
+    factors = 1:5,
+    color_by = "stim",
+    add_violin = FALSE,
+    dodge = TRUE,
+    add_boxplot = TRUE
+)
+```
+
+## Top feature weights
+
+```{r mofa2-weights, fig.cap="Top 10 feature weights for Factor 1."}
+MOFA2::plot_top_weights(
+    mofa,
+    view      = "rna",
+    factor    = 5,
+    nfeatures = 10
+)
+```
+
+```{r mofa2-umap, fig.cap="UMAP of MOFA-FLEX factor scores coloured by stimulation condition."}
+factors <- MOFA2::get_factors(mofa, factors = 1:5)
+df <- cbind(
+    factors$group_1,
+    as.data.frame(SummarizedExperiment::colData(sce_hvg)[rownames(factors$group_1), ])
+)
+umaps <- uwot::umap(factors$group_1, n_neighbors = 15, min_dist = 0.1, metric = "cosine")
+df <- cbind(df, UMAP1 = umaps[, 1], UMAP2 = umaps[, 2])
+ggplot2::ggplot(df, ggplot2::aes(x = UMAP1, y = UMAP2, color = stim)) +
+    ggplot2::geom_point(size = 0.5, alpha = 0.6) +
+    ggplot2::theme_minimal() +
+    ggplot2::labs(title = "UMAP of MOFA-FLEX factors coloured by stimulation condition")
+```
+
+Alternatively, use basilisk to run MOFAFlex in a separate Python process. The model is saved to disk anyway and loaded with MOFA2. If `setBasiliskShared(TRUE)`, the Python model is loaded into the current R session.
+
+```r 
+
+basilisk::setBasiliskFork(TRUE) # use forked processes for parallelism (Linux/Mac only)
+basilisk::setBasiliskShared(FALSE) # share the same Python environment across processes (saves memory)
+
+output_dir <- file.path("results", "mofaflex")
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+model_path <- file.path(output_dir, "kang_mofaflex.hdf5")
+
+with_mofaflex_env({
+  adata <- MofaflexR::sce_to_reticulate_anndata(sce_hvg, assay = "logcounts")
+  MofaflexR::fit_mofaflex(
+    data = adata,
+    data_options = list(scale_per_group = TRUE, subset_var = NULL, plot_data_overview = FALSE),
+    model_options = list(n_factors = 5L, weight_prior = "Horseshoe"),
+    training_options = list(max_epochs = 5000L, early_stopper_patience = 50L, seed = 42L,
+                            device = "cuda", save_path = model_path),
+    mofa_compat = "modelonly"
+  )
+  return(NULL)
+}, sce_hvg = sce_hvg, model_path = model_path)
+```
+
+---
+
+# Session info {#session}
+
+```{r session-info, eval=TRUE}
+sessionInfo()
+```
