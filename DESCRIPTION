@@ -2,7 +2,7 @@ Package: MofaflexR
 Title: Fit MOFAFlex Models from R via basilisk and reticulate
 Version: 0.0.1
 Authors@R:
-    person("MofaflexR", "Author", email = "author@example.com", role = c("aut", "cre"))
+    person("Maximilian Nuber", email = "maximilian.d.nuber@gmail.com", role = c("aut", "cre"))
 Description:
     Provides an R interface to the MOFAFlex Python package for multi-omics
     factor analysis. Core functionality includes zero-copy conversion of
