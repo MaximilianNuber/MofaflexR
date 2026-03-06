@@ -5,17 +5,41 @@
 MofaflexR provides an R-native bridge between
 [SingleCellExperiment](https://bioconductor.org/packages/SingleCellExperiment/)
 objects and the Python [MOFAFlex](https://github.com/bioFAM/mofaflex)
-package. The key contribution is a **zero-copy sparse bridge**: count
-matrices stored as `Matrix::dgCMatrix` are exposed to Python
-`scipy.sparse` without densifying or allocating a second copy of the
-data.
+package for multi-omics factor analysis. The key contribution is a
+**zero-copy sparse bridge**: count matrices stored as
+`Matrix::dgCMatrix` are exposed to Python `scipy.sparse` without
+densifying or allocating a second copy of the data.
 
 The Python environment (numpy, scipy, anndata, mofaflex) is managed
 automatically by
 [basilisk](https://bioconductor.org/packages/basilisk/); users do
 **not** need to install Python manually.
 
-------------------------------------------------------------------------
+MOFAFlex was developed by:
+
+Qoku A, Rohbeck M, Walter FC, Kats I, Stegle O, and Buettner F.
+
+### Citation
+
+Qoku A, Rohbeck M, Walter FC, Kats I, Stegle O, Buettner F.  
+**MOFA-FLEX: A Factor Model Framework for Integrating Omics Data with
+Prior Knowledge.**  
+bioRxiv (2025).  
+<https://doi.org/10.1101/2025.11.03.686250>
+
+### Documentation
+
+Official MOFAFlex documentation:  
+<https://mofaflex.readthedocs.io>
+
+### License
+
+MOFAFlex is licensed under the BSD 3-Clause License.
+
+|                                                                                                                      |
+|:---------------------------------------------------------------------------------------------------------------------|
+| The docs can be found under                                                                                          |
+| [![Documentation](https://img.shields.io/badge/docs-pkgdown-blue.svg)](https://maximiliannuber.github.io/MofaflexR/) |
 
 ## Installation
 

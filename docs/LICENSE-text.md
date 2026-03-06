@@ -1,4 +1,4 @@
 # License
 
     YEAR: 2026
-    COPYRIGHT HOLDER: MofaflexR Authors
+    COPYRIGHT HOLDER: Maximilian Nuber

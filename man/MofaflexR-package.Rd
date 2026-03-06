@@ -9,7 +9,7 @@
 Provides an R interface to the MOFAFlex Python package for multi-omics factor analysis. Core functionality includes zero-copy conversion of SingleCellExperiment assays (stored as Matrix::dgCMatrix) to scipy.sparse.csc_matrix Python objects, wrapping of the resulting AnnData in an anndataR::ReticulateAnnData, and a ReticulateMuData R6 wrapper around Python mudata.MuData objects. The Python environment is managed automatically via basilisk, requiring no manual Python installation.
 }
 \author{
-\strong{Maintainer}: MofaflexR Author \email{author@example.com}
+\strong{Maintainer}: Maximilian Nuber \email{maximilian.d.nuber@gmail.com}
 
 }
 \keyword{internal}

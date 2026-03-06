@@ -11,4 +11,4 @@ installation.
 
 ## Author
 
-**Maintainer**: MofaflexR Author <author@example.com>
+**Maintainer**: Maximilian Nuber <maximilian.d.nuber@gmail.com>

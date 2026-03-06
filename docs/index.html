@@ -40,6 +40,7 @@
     <li><a class="dropdown-item" href="articles/zero-copy-sparse-bridge.html">Zero-copy sparse bridge: SingleCellExperiment → scipy.sparse → AnnData</a></li>
   </ul>
 </li>
+<li class="nav-item"><a class="nav-link" href="news/index.html">Changelog</a></li>
       </ul>
 <ul class="navbar-nav">
 <li class="nav-item"><form class="form-inline" role="search">
@@ -56,9 +57,37 @@
 <div class="page-header"><h1 id="mofaflexr">MofaflexR<a class="anchor" aria-label="anchor" href="#mofaflexr"></a>
 </h1></div>
 <p><strong>Fit MOFAFlex models from R via basilisk + reticulate.</strong></p>
-<p>MofaflexR provides an R-native bridge between <a href="https://bioconductor.org/packages/SingleCellExperiment/" class="external-link">SingleCellExperiment</a> objects and the Python <a href="https://github.com/bioFAM/mofaflex" class="external-link">MOFAFlex</a> package. The key contribution is a <strong>zero-copy sparse bridge</strong>: count matrices stored as <code>Matrix::dgCMatrix</code> are exposed to Python <code>scipy.sparse</code> without densifying or allocating a second copy of the data.</p>
+<p>MofaflexR provides an R-native bridge between <a href="https://bioconductor.org/packages/SingleCellExperiment/" class="external-link">SingleCellExperiment</a> objects and the Python <a href="https://github.com/bioFAM/mofaflex" class="external-link">MOFAFlex</a> package for multi-omics factor analysis. The key contribution is a <strong>zero-copy sparse bridge</strong>: count matrices stored as <code>Matrix::dgCMatrix</code> are exposed to Python <code>scipy.sparse</code> without densifying or allocating a second copy of the data.</p>
 <p>The Python environment (numpy, scipy, anndata, mofaflex) is managed automatically by <a href="https://bioconductor.org/packages/basilisk/" class="external-link">basilisk</a>; users do <strong>not</strong> need to install Python manually.</p>
-<hr>
+<p>MOFAFlex was developed by:</p>
+<p>Qoku A, Rohbeck M, Walter FC, Kats I, Stegle O, and Buettner F.</p>
+<div class="section level3">
+<h3 id="citation">Citation<a class="anchor" aria-label="anchor" href="#citation"></a>
+</h3>
+<p>Qoku A, Rohbeck M, Walter FC, Kats I, Stegle O, Buettner F.<br><strong>MOFA-FLEX: A Factor Model Framework for Integrating Omics Data with Prior Knowledge.</strong><br>
+bioRxiv (2025).<br><a href="https://doi.org/10.1101/2025.11.03.686250" class="external-link uri">https://doi.org/10.1101/2025.11.03.686250</a></p>
+</div>
+<div class="section level3">
+<h3 id="documentation">Documentation<a class="anchor" aria-label="anchor" href="#documentation"></a>
+</h3>
+<p>Official MOFAFlex documentation:<br><a href="https://mofaflex.readthedocs.io" class="external-link uri">https://mofaflex.readthedocs.io</a></p>
+</div>
+<div class="section level3">
+<h3 id="license">License<a class="anchor" aria-label="anchor" href="#license"></a>
+</h3>
+<p>MOFAFlex is licensed under the BSD 3-Clause License.</p>
+<table class="table">
+<colgroup><col width="100%"></colgroup>
+<tbody>
+<tr class="odd">
+<td align="left">The docs can be found under</td>
+</tr>
+<tr class="even">
+<td align="left"><a href="https://maximiliannuber.github.io/MofaflexR/" class="external-link"><img src="https://img.shields.io/badge/docs-pkgdown-blue.svg" alt="Documentation"></a></td>
+</tr>
+</tbody>
+</table>
+</div>
 <div class="section level2">
 <h2 id="installation">Installation<a class="anchor" aria-label="anchor" href="#installation"></a>
 </h2>
@@ -490,7 +519,7 @@
 <div class="developers">
 <h2 data-toc-skip>Developers</h2>
 <ul class="list-unstyled">
-<li>MofaflexR Author <br><small class="roles"> Author, maintainer </small>   </li>
+<li>Maximilian Nuber <br><small class="roles"> Author, maintainer </small>   </li>
 </ul>
 </div>
 
@@ -501,7 +530,7 @@
 
 
     <footer><div class="pkgdown-footer-left">
-  <p>Developed by MofaflexR Author.</p>
+  <p>Developed by Maximilian Nuber.</p>
 </div>
 
 <div class="pkgdown-footer-right">
