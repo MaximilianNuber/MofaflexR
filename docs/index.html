@@ -37,7 +37,7 @@
   <ul class="dropdown-menu" aria-labelledby="dropdown-articles">
 <li><a class="dropdown-item" href="articles/kang-analysis.html">Kang IFN-β PBMC: MOFA-FLEX from R to MOFA2</a></li>
     <li><a class="dropdown-item" href="articles/multimodal-mudata-bridge.html">Bridging Single-Cell Multi-Omics: SCE and MAE to Python MuData</a></li>
-    <li><a class="dropdown-item" href="articles/zero-copy-sparse-bridge.html">Zero-copy sparse bridge: SingleCellExperiment → scipy.sparse → AnnData</a></li>
+    <li><a class="dropdown-item" href="articles/zero-copy-sparse-bridge.html">Matrix-aware R-to-Python bridge: SummarizedExperiment → NumPy / SciPy → AnnData</a></li>
   </ul>
 </li>
 <li class="nav-item"><a class="nav-link" href="news/index.html">Changelog</a></li>
@@ -57,7 +57,12 @@
 <div class="page-header"><h1 id="mofaflexr">MofaflexR<a class="anchor" aria-label="anchor" href="#mofaflexr"></a>
 </h1></div>
 <p><strong>Fit MOFAFlex models from R via basilisk + reticulate.</strong></p>
-<p>MofaflexR provides an R-native bridge between <a href="https://bioconductor.org/packages/SingleCellExperiment/" class="external-link">SingleCellExperiment</a> objects and the Python <a href="https://github.com/bioFAM/mofaflex" class="external-link">MOFAFlex</a> package for multi-omics factor analysis. The key contribution is a <strong>zero-copy sparse bridge</strong>: count matrices stored as <code>Matrix::dgCMatrix</code> are exposed to Python <code>scipy.sparse</code> without densifying or allocating a second copy of the data.</p>
+<p>MofaflexR provides an R-native bridge between Bioconductor assay containers and the Python <a href="https://github.com/bioFAM/mofaflex" class="external-link">MOFAFlex</a> package for multi-omics factor analysis. The package converts assay matrices from <code>SummarizedExperiment</code> / <code>SingleCellExperiment</code> objects to NumPy arrays or SciPy sparse matrices using <strong>matrix-type-aware dispatch</strong>, and zero-copy is used where possible depending on the matrix representation:</p>
+<ul>
+<li>Sparse matrices stored as <code>dgCMatrix</code> / <code>dgRMatrix</code> are bridged to the matching SciPy format by exposing the backing slot arrays via the C buffer protocol (<code>flags.owndata = False</code>).</li>
+<li>Dense matrices (<code>dgeMatrix</code>, base <code>matrix</code>) are converted to Fortran-order NumPy arrays via a buffer-protocol path that avoids copying where possible.</li>
+<li>COO sparse arrays (<code><a href="https://rdrr.io/pkg/SparseArray/man/COO_SparseArray-class.html" class="external-link">SparseArray::COO_SparseMatrix</a></code>) are supported; value arrays are zero-copy, coordinate arrays require a 1→0 base conversion.</li>
+</ul>
 <p>The Python environment (numpy, scipy, anndata, mofaflex) is managed automatically by <a href="https://bioconductor.org/packages/basilisk/" class="external-link">basilisk</a>; users do <strong>not</strong> need to install Python manually.</p>
 <p>MOFAFlex was developed by:</p>
 <p>Qoku A, Rohbeck M, Walter FC, Kats I, Stegle O, and Buettner F.</p>
@@ -99,7 +104,7 @@ bioRxiv (2025).<br><a href="https://doi.org/10.1101/2025.11.03.686250" class="ex
 <span>                        <span class="st">"anndataR"</span><span class="op">)</span><span class="op">)</span></span>
 <span></span>
 <span><span class="co"># Install MofaflexR from source (once on CRAN/Bioconductor, use that)</span></span>
-<span><span class="co"># remotes::install_github("yourorg/MofaflexR")</span></span></code></pre></div>
+<span><span class="co"># remotes::install_github("MaximilianNuber/MofaflexR")</span></span></code></pre></div>
 <hr>
 </div>
 <div class="section level2">
@@ -118,7 +123,10 @@ bioRxiv (2025).<br><a href="https://doi.org/10.1101/2025.11.03.686250" class="ex
 <span><span class="fu"><a href="https://rdrr.io/r/base/colnames.html" class="external-link">colnames</a></span><span class="op">(</span><span class="va">sce</span><span class="op">)</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/r/base/paste.html" class="external-link">paste0</a></span><span class="op">(</span><span class="st">"cell"</span>, <span class="fu"><a href="https://rdrr.io/r/base/seq.html" class="external-link">seq_len</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/nrow.html" class="external-link">ncol</a></span><span class="op">(</span><span class="va">sce</span><span class="op">)</span><span class="op">)</span><span class="op">)</span></span>
 <span><span class="fu"><a href="https://rdrr.io/r/base/colnames.html" class="external-link">rownames</a></span><span class="op">(</span><span class="va">sce</span><span class="op">)</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/r/base/paste.html" class="external-link">paste0</a></span><span class="op">(</span><span class="st">"gene"</span>, <span class="fu"><a href="https://rdrr.io/r/base/seq.html" class="external-link">seq_len</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/nrow.html" class="external-link">nrow</a></span><span class="op">(</span><span class="va">sce</span><span class="op">)</span><span class="op">)</span><span class="op">)</span></span>
 <span></span>
-<span><span class="co"># ----- 2. Convert to ReticulateAnnData (zero-copy sparse bridge) -----</span></span>
+<span><span class="co"># ----- 2. Convert to ReticulateAnnData (matrix-aware bridge) -----------</span></span>
+<span><span class="co"># The dgCMatrix counts assay is identified as sparse and is bridged to</span></span>
+<span><span class="co"># scipy.sparse.csc_matrix via zero-copy slot views (owndata = FALSE).</span></span>
+<span><span class="co"># A dense assay would be converted to a NumPy ndarray instead.</span></span>
 <span><span class="va">rada</span> <span class="op">&lt;-</span> <span class="fu"><a href="reference/sce_to_reticulate_anndata.html">sce_to_reticulate_anndata</a></span><span class="op">(</span><span class="va">sce</span><span class="op">)</span></span>
 <span><span class="fu"><a href="https://rdrr.io/r/base/print.html" class="external-link">print</a></span><span class="op">(</span><span class="va">rada</span><span class="op">)</span></span>
 <span><span class="co">#&gt; ReticulateAnnData object with n_obs × n_vars = 50 × 200</span></span>
@@ -133,17 +141,21 @@ bioRxiv (2025).<br><a href="https://doi.org/10.1101/2025.11.03.686250" class="ex
 <span><span class="fu"><a href="https://rdrr.io/r/base/cat.html" class="external-link">cat</a></span><span class="op">(</span><span class="st">"owndata: "</span>, <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/r-py-conversion.html" class="external-link">py_to_r</a></span><span class="op">(</span><span class="va">py_adata</span><span class="op">$</span><span class="va">X</span><span class="op">$</span><span class="va">data</span><span class="op">$</span><span class="va">flags</span><span class="op">$</span><span class="va">owndata</span><span class="op">)</span>, <span class="st">"\n"</span><span class="op">)</span></span>
 <span><span class="co"># Shape:    50 x 200</span></span>
 <span><span class="co"># Sparse:   TRUE</span></span>
-<span><span class="co"># owndata:  FALSE   ← no copy of the data array</span></span></code></pre></div>
+<span><span class="co"># owndata:  FALSE   ← no copy of the underlying data arrays</span></span></code></pre></div>
 <div class="section level3">
-<h3 id="low-level-usage-csc-matrix-only">Low-level usage: CSC matrix only<a class="anchor" aria-label="anchor" href="#low-level-usage-csc-matrix-only"></a>
+<h3 id="low-level-assay-conversion">Low-level assay conversion<a class="anchor" aria-label="anchor" href="#low-level-assay-conversion"></a>
 </h3>
+<p>The package dispatches by matrix class. For a <code>dgCMatrix</code> assay, the low-level helper <code><a href="reference/sce_assay_to_scipy_csc.html">sce_assay_to_scipy_csc()</a></code> returns a <code>csc_matrix</code> in features × cells orientation (matching the R assay):</p>
 <div class="sourceCode" id="cb3"><pre class="downlit sourceCode r">
-<code class="sourceCode R"><span><span class="co"># Returns a Python scipy.sparse.csc_matrix (shape = genes × cells)</span></span>
+<code class="sourceCode R"><span><span class="co"># Returns a scipy.sparse.csc_matrix (shape = genes × cells)</span></span>
+<span><span class="co"># Other sparse classes (dgRMatrix, COO_SparseMatrix) are handled</span></span>
+<span><span class="co"># by analogous internal converters.</span></span>
 <span><span class="va">csc</span> <span class="op">&lt;-</span> <span class="fu"><a href="reference/sce_assay_to_scipy_csc.html">sce_assay_to_scipy_csc</a></span><span class="op">(</span><span class="va">sce</span>, assay <span class="op">=</span> <span class="st">"counts"</span><span class="op">)</span></span>
 <span></span>
 <span><span class="va">shape_r</span> <span class="op">&lt;-</span> <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/r-py-conversion.html" class="external-link">py_to_r</a></span><span class="op">(</span><span class="va">csc</span><span class="op">$</span><span class="va">shape</span><span class="op">)</span></span>
 <span><span class="fu"><a href="https://rdrr.io/r/base/cat.html" class="external-link">cat</a></span><span class="op">(</span><span class="st">"Shape:"</span>, <span class="va">shape_r</span><span class="op">[[</span><span class="fl">1</span><span class="op">]</span><span class="op">]</span>, <span class="st">"x"</span>, <span class="va">shape_r</span><span class="op">[[</span><span class="fl">2</span><span class="op">]</span><span class="op">]</span>, <span class="st">"\n"</span><span class="op">)</span>  <span class="co"># 200 x 50</span></span>
 <span><span class="fu"><a href="https://rdrr.io/r/base/cat.html" class="external-link">cat</a></span><span class="op">(</span><span class="st">"nnz:  "</span>, <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/r-py-conversion.html" class="external-link">py_to_r</a></span><span class="op">(</span><span class="va">csc</span><span class="op">$</span><span class="va">nnz</span><span class="op">)</span>, <span class="st">"\n"</span><span class="op">)</span></span></code></pre></div>
+<p>For general dispatch across all supported matrix types, the package internally uses <code>se_assay_to_python_matrix()</code>. This function accepts any <code>SummarizedExperiment</code> subclass, extracts the named assay, and routes it to the appropriate NumPy / SciPy converter.</p>
 </div>
 <div class="section level3">
 <h3 id="using-the-basilisk-managed-environment">Using the basilisk-managed environment<a class="anchor" aria-label="anchor" href="#using-the-basilisk-managed-environment"></a>
@@ -330,44 +342,60 @@ bioRxiv (2025).<br><a href="https://doi.org/10.1101/2025.11.03.686250" class="ex
 </div>
 </div>
 <div class="section level2">
-<h2 id="zero-copy-sparse-bridge-how-it-works-and-what-can-force-copies">Zero-copy sparse bridge: how it works and what can force copies<a class="anchor" aria-label="anchor" href="#zero-copy-sparse-bridge-how-it-works-and-what-can-force-copies"></a>
+<h2 id="matrix-aware-bridge-how-zero-copy-works-and-what-can-force-copies">Matrix-aware bridge: how zero-copy works and what can force copies<a class="anchor" aria-label="anchor" href="#matrix-aware-bridge-how-zero-copy-works-and-what-can-force-copies"></a>
 </h2>
 <div class="section level3">
 <h3 id="how-it-works">How it works<a class="anchor" aria-label="anchor" href="#how-it-works"></a>
 </h3>
-<p><code>dgCMatrix</code> stores its non-zero data in three contiguous C arrays:</p>
+<p>The package inspects the class of the assay matrix and routes it to the appropriate converter. The dispatch table is:</p>
 <table class="table">
+<colgroup>
+<col width="25%">
+<col width="38%">
+<col width="35%">
+</colgroup>
 <thead><tr class="header">
-<th>Slot</th>
-<th>Content</th>
-<th>R type</th>
-<th>NumPy dtype</th>
+<th>R matrix class</th>
+<th>Python target</th>
+<th>Zero-copy for data arrays?</th>
 </tr></thead>
 <tbody>
 <tr class="odd">
-<td><code>@x</code></td>
-<td>non-zero values</td>
-<td><code>double</code></td>
-<td><code>float64</code></td>
+<td><code>matrix</code></td>
+<td><code>numpy.ndarray</code></td>
+<td>Yes (buffer protocol via <code>r_to_py</code>)</td>
 </tr>
 <tr class="even">
-<td><code>@i</code></td>
-<td>row indices (0-based)</td>
-<td><code>integer</code></td>
-<td><code>int32</code></td>
+<td><code>dgeMatrix</code></td>
+<td><code>numpy.ndarray</code></td>
+<td>Yes (<code>@x</code> slot + Fortran reshape)</td>
 </tr>
 <tr class="odd">
-<td><code>@p</code></td>
-<td>column pointers</td>
-<td><code>integer</code></td>
-<td><code>int32</code></td>
+<td><code>dgCMatrix</code></td>
+<td><code>scipy.sparse.csc_matrix</code></td>
+<td>Yes (<code>@x</code>, <code>@i</code>, <code>@p</code> slot views)</td>
+</tr>
+<tr class="even">
+<td><code>dgRMatrix</code></td>
+<td><code>scipy.sparse.csr_matrix</code></td>
+<td>Yes (<code>@x</code>, <code>@j</code>, <code>@p</code> slot views)</td>
+</tr>
+<tr class="odd">
+<td><code>COO_SparseMatrix</code></td>
+<td><code>scipy.sparse.coo_matrix</code></td>
+<td>Values yes; coordinates no (1→0 base conversion)</td>
+</tr>
+<tr class="even">
+<td>Other</td>
+<td>
+<code>csc_matrix</code> or <code>ndarray</code>
+</td>
+<td>No (one R-level copy during coercion)</td>
 </tr>
 </tbody>
 </table>
-<p><code>reticulate::np_array(&lt;R vector&gt;, dtype = ...)</code> exposes the underlying R memory to NumPy via the <strong>C buffer protocol</strong> — no data allocation occurs (<code>numpy.ndarray.flags.owndata == False</code>).</p>
-<p>These three arrays are then passed directly to <code>scipy.sparse.csc_matrix((data, indices, indptr), shape=...)</code>.</p>
-<p><code>scipy</code> itself does not copy the buffers at construction time; it wraps them by reference.</p>
-<p>The resulting <code>csc_matrix</code> (shape <code>genes × cells</code>) is then transposed via <code>.T</code> to obtain a <code>csr_matrix</code> (shape <code>cells × genes</code>) suitable for AnnData’s <code>obs × vars</code> layout. The <code>scipy</code> transpose is also <strong>zero-copy</strong>: it reuses the same C arrays, only changing strides and shape metadata.</p>
+<p>For the sparse paths, <code><a href="https://rstudio.github.io/reticulate/reference/np_array.html" class="external-link">reticulate::np_array()</a></code> uses the C buffer protocol to expose R slot vector memory to NumPy without allocation (<code>numpy.ndarray.flags.owndata == False</code>). SciPy stores references to these arrays at construction time; it does not copy them.</p>
+<p>The resulting Python object has shape <code>(n_features, n_cells)</code> — matching the R assay. <code><a href="reference/sce_to_anndata.html">sce_to_anndata()</a></code> then transposes it once via <code>.T</code> to obtain AnnData’s expected <code>obs × vars = cells × features</code> layout. For SciPy sparse matrices, <code>.T</code> is itself a zero-copy operation.</p>
 </div>
 <div class="section level3">
 <h3 id="what-can-force-a-copy">What CAN force a copy<a class="anchor" aria-label="anchor" href="#what-can-force-a-copy"></a>
@@ -383,17 +411,27 @@ bioRxiv (2025).<br><a href="https://doi.org/10.1101/2025.11.03.686250" class="ex
 </tr></thead>
 <tbody>
 <tr class="odd">
-<td>Coercion from a non-<code>dgCMatrix</code> assay</td>
+<td>Assay class has no direct converter (fallback)</td>
 <td>
-<code>as(mat, "dgCMatrix")</code> may allocate a new object</td>
+<code>as(mat, "dgCMatrix")</code> allocates a new R object</td>
 </tr>
 <tr class="even">
-<td><code>adata$X = some_dense_array</code></td>
-<td>AnnData will densify if you assign a dense numpy array</td>
+<td>COO coordinates</td>
+<td>1 → 0 base conversion requires new integer vectors</td>
 </tr>
 <tr class="odd">
-<td>Reading <code>adata$X</code> back to R via <code><a href="https://rstudio.github.io/reticulate/reference/r-py-conversion.html" class="external-link">py_to_r()</a></code>
+<td>Dense <code>integer</code> matrix</td>
+<td>
+<code>storage.mode(x) &lt;- "double"</code> copies</td>
+</tr>
+<tr class="even">
+<td>
+<code>obs</code> / <code>var</code> metadata → pandas <code>DataFrame</code>
 </td>
+<td>R columnar <code>data.frame</code> → Python row-oriented; unavoidable</td>
+</tr>
+<tr class="odd">
+<td><code>py_to_r(adata$X)</code></td>
 <td>reticulate converts to a dense R matrix</td>
 </tr>
 <tr class="even">
@@ -403,12 +441,12 @@ bioRxiv (2025).<br><a href="https://doi.org/10.1101/2025.11.03.686250" class="ex
 </tr>
 <tr class="odd">
 <td>
-<code>.copy()</code> on any sparse matrix</td>
+<code>.copy()</code> on any NumPy or SciPy object</td>
 <td>Explicit copy</td>
 </tr>
 <tr class="even">
-<td>Operations that require sorted indices (e.g. <code>adata.X.sort_indices()</code>)</td>
-<td>Creates new arrays</td>
+<td>Operations requiring sorted indices in SciPy</td>
+<td>May create new index arrays</td>
 </tr>
 </tbody>
 </table>
@@ -416,13 +454,13 @@ bioRxiv (2025).<br><a href="https://doi.org/10.1101/2025.11.03.686250" class="ex
 <div class="section level3">
 <h3 id="lifetime-caveat">Lifetime caveat<a class="anchor" aria-label="anchor" href="#lifetime-caveat"></a>
 </h3>
-<p>The Python <code>csc_matrix</code> holds a <strong>borrowed reference</strong> to the R vectors <code>mat@x</code>, <code>mat@i</code>, and <code>mat@p</code>. You must ensure that:</p>
+<p>When zero-copy conversion is used, the Python object holds a <strong>borrowed reference</strong> to the R vectors backing the matrix slots. You must ensure that:</p>
 <ol style="list-style-type: decimal">
-<li>The <code>dgCMatrix</code> object (and therefore its slots) remains alive while Python is using the matrix.</li>
-<li>No R code modifies the vectors in-place (copy-on-modify semantics usually prevent this for normal R code).</li>
+<li>The source R matrix object (and therefore its slots) remains alive while Python is using the converted object.</li>
+<li>No R code modifies the vectors in-place (copy-on-modify semantics usually prevent this for normal R usage).</li>
 <li>The R garbage collector has not freed the underlying memory.</li>
 </ol>
-<p>In practice, as long as the <code>MofaflexR</code> call site holds a reference to <code>sce</code> (or the extracted <code>dgCMatrix</code>) within the same R session, the memory is safe.</p>
+<p>In practice, as long as the call site holds a reference to <code>sce</code> (or the extracted matrix) within the same R session, the memory is safe.</p>
 <hr>
 </div>
 </div>
@@ -440,17 +478,18 @@ bioRxiv (2025).<br><a href="https://doi.org/10.1101/2025.11.03.686250" class="ex
 </tr></thead>
 <tbody>
 <tr class="odd">
-<td><code>sce_assay_to_scipy_csc(x, assay)</code></td>
-<td>Extract assay → <code>scipy.sparse.csc_matrix</code> (genes × cells, zero-copy)</td>
+<td><code>sce_to_anndata(x, assay, obs, var, ...)</code></td>
+<td>
+<code>SummarizedExperiment</code> / SCE → Python <code>anndata.AnnData</code>; dispatches by matrix class; transposed to cells × features</td>
 </tr>
 <tr class="even">
-<td><code>sce_to_anndata(x, assay, obs, var, ...)</code></td>
-<td>Full SCE → Python <code>anndata.AnnData</code> (cells × genes)</td>
+<td><code>sce_to_reticulate_anndata(x, assay, ...)</code></td>
+<td>Wraps <code><a href="reference/sce_to_anndata.html">sce_to_anndata()</a></code> result in <code><a href="https://anndataR.scverse.org/reference/ReticulateAnnData.html" class="external-link">anndataR::ReticulateAnnData</a></code>
+</td>
 </tr>
 <tr class="odd">
-<td><code>sce_to_reticulate_anndata(x, assay, ...)</code></td>
-<td>SCE → <code><a href="https://anndataR.scverse.org/reference/ReticulateAnnData.html" class="external-link">anndataR::ReticulateAnnData</a></code>
-</td>
+<td><code>sce_assay_to_scipy_csc(x, assay)</code></td>
+<td>Low-level: extract <code>dgCMatrix</code> assay → <code>scipy.sparse.csc_matrix</code> (features × cells, zero-copy slots)</td>
 </tr>
 <tr class="even">
 <td><code>fit_mofaflex(data, data_options, model_options, training_options, mofa_compat, ...)</code></td>

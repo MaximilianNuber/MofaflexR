@@ -1,89 +1,219 @@
-# Zero-copy sparse bridge: SingleCellExperiment → scipy.sparse → AnnData
+# Matrix-aware R-to-Python bridge: SummarizedExperiment → NumPy / SciPy → AnnData
 
 ## Overview
 
-This vignette explains how **MofaflexR** converts a
-`SingleCellExperiment` (SCE) assay stored as a `Matrix::dgCMatrix` into
-a Python `scipy.sparse.csc_matrix` — without copying the underlying data
-arrays — and then wraps it in an `anndata.AnnData` object accessible
-from R via
+This vignette explains how **MofaflexR** converts assay matrices from a
+`SummarizedExperiment` (or any subclass, including
+`SingleCellExperiment`) into Python NumPy / SciPy objects via
+`reticulate`, and then wraps the result in an `anndata.AnnData`
+accessible from R via
 [`anndataR::ReticulateAnnData`](https://anndataR.scverse.org/reference/ReticulateAnnData.html).
+
+The conversion is **dispatch-based**: the package inspects the R class
+of the assay matrix and selects the most appropriate Python
+representation, aiming to avoid unnecessary copies.
+
+Supported input matrix classes:
+
+| R matrix class     | Python target                        | Zero-copy behavior                                     |
+|--------------------|--------------------------------------|--------------------------------------------------------|
+| `matrix`           | `numpy.ndarray`                      | Zero-copy where possible via `r_to_py` buffer protocol |
+| `dgeMatrix`        | `numpy.ndarray`                      | Zero-copy via `@x` slot + Fortran-order reshape        |
+| `dgCMatrix`        | `scipy.sparse.csc_matrix`            | Zero-copy for `@x`, `@i`, `@p` slot arrays             |
+| `dgRMatrix`        | `scipy.sparse.csr_matrix`            | Zero-copy for `@x`, `@j`, `@p` slot arrays             |
+| `COO_SparseMatrix` | `scipy.sparse.coo_matrix`            | Zero-copy for values; coordinates require a copy       |
+| Other              | coerced to `csc_matrix` or `ndarray` | One R-level copy during coercion                       |
 
 ## Motivation
 
-Single-cell RNA-seq count matrices can contain tens of millions of
-non-zero entries. Copying such matrices at the R ↔︎ Python boundary
-wastes both memory and time. MofaflexR avoids this by using
-[`reticulate::np_array()`](https://rstudio.github.io/reticulate/reference/np_array.html),
-which exposes R’s contiguous memory to NumPy via the **C buffer
-protocol** without allocating new heap storage.
+Single-cell count matrices can contain tens of millions of non-zero
+entries. Copying them at the R ↔︎ Python boundary wastes memory and time.
+Different matrix classes expose memory in different ways; MofaflexR
+picks an appropriate conversion for each:
 
-## Background: dgCMatrix memory layout
+- **Supported sparse formats** store their data, indices, and pointers
+  in contiguous R integer/numeric vectors that can be handed to NumPy
+  via the C buffer protocol
+  ([`reticulate::np_array()`](https://rstudio.github.io/reticulate/reference/np_array.html)),
+  producing views with `flags.owndata == False`.
+- **Dense base matrices and `dgeMatrix`** store their values as a single
+  contiguous column-major vector which can be similarly exposed as a
+  Fortran-order NumPy array.
+- **COO coordinate matrices** require a 1→0 index-base conversion, so
+  the coordinate arrays must be copied; only the value array can be a
+  zero-copy view.
 
-A `dgCMatrix` with *m* genes (rows) and *n* cells (columns) stores:
+## How assay dispatch works
 
-| Slot | Content                                                        | Length  | R type                      |
-|------|----------------------------------------------------------------|---------|-----------------------------|
-| `@x` | non-zero values (column-major)                                 | `nnz`   | `numeric` (double, 8 bytes) |
-| `@i` | row indices of each `@x` entry (0-based)                       | `nnz`   | `integer` (int32, 4 bytes)  |
-| `@p` | column pointer: `@p[j]` = index into `@x` where col `j` starts | `n + 1` | `integer` (int32, 4 bytes)  |
-
-This is exactly the CSC (Compressed Sparse Column) format used by
-`scipy.sparse.csc_matrix`.
-
-## How `sce_assay_to_scipy_csc()` works
+The container-level entry point is
+[`sce_to_anndata()`](../reference/sce_to_anndata.md) (and its
+[`sce_to_reticulate_anndata()`](../reference/sce_to_reticulate_anndata.md)
+wrapper). Internally, assay conversion follows this path:
 
 ``` r
-# Pseudocode (simplified)
-sp         <- reticulate::import("scipy.sparse", convert = FALSE)
-py_data    <- reticulate::np_array(mat@x, dtype = "float64")  # no copy
-py_indices <- reticulate::np_array(mat@i, dtype = "int32")    # no copy
-py_indptr  <- reticulate::np_array(mat@p, dtype = "int32")    # no copy
-shape      <- reticulate::tuple(nr, nc)
-csc        <- sp$csc_matrix(reticulate::tuple(py_data, py_indices, py_indptr),
-                             shape = shape)
+# Conceptual pseudocode
+X <- se_assay_to_python_matrix(x, assay = assay, prefer_sparse = TRUE)
+# X has shape (n_features, n_samples) — same as the R assay
+X <- X$T   # transpose once: AnnData expects (obs=cells, vars=features)
 ```
 
+The internal dispatcher selects converters by matrix class:
+
+``` r
+# Simplified dispatch logic
+if (is.matrix(x))                 return(.dense_matrix_to_numpy(x))
+if (is(x, "dgeMatrix"))           return(.dense_matrix_to_numpy(x))
+if (is(x, "dgCMatrix"))           return(.dgCMatrix_to_scipy_csc(x))
+if (is(x, "dgRMatrix"))           return(.dgRMatrix_to_scipy_csr(x))
+if (is(x, "COO_SparseArray"))     return(.coo_matrix_to_scipy_coo(x))
+# fallback: coerce to dgCMatrix or densify, then convert
+```
+
+## Dense matrix conversion
+
+### Base `matrix`
+
+``` r
+# r_to_py on a base R matrix uses NumPy's buffer protocol.
+# The result is a Fortran-order float64 ndarray; owndata = FALSE.
+# (Observed behavior; the reticulate API does not formally guarantee it,
+# but it is stable in practice across current versions.)
+arr <- reticulate::r_to_py(mat)  # shape (nrow, ncol), owndata = FALSE
+```
+
+R matrices are column-major; NumPy’s Fortran order matches this layout,
+so no reordering is needed and no copy occurs during the conversion
+itself.
+
+### `dgeMatrix`
+
+`dgeMatrix` stores its values in a plain `@x` slot (a column-major
+numeric vector), plus `@Dim`. The conversion exposes `@x` as a 1-D
+zero-copy view, then calls `.reshape((nr, nc), order = "F")`. Because
+the 1-D buffer is already laid out in column-major order, NumPy’s
+reshape returns a Fortran-contiguous 2-D **view** (`owndata = FALSE`);
+no copy is made.
+
+## Sparse matrix conversion
+
+### `dgCMatrix` → `scipy.sparse.csc_matrix`
+
+A `dgCMatrix` with *m* features (rows) and *n* samples (columns) stores:
+
+| Slot | Content                                              | Length  | R type               |
+|------|------------------------------------------------------|---------|----------------------|
+| `@x` | non-zero values                                      | `nnz`   | `double` → `float64` |
+| `@i` | row indices (0-based)                                | `nnz`   | `integer` → `int32`  |
+| `@p` | column pointers (`@p[j]` = start of col `j` in `@x`) | `n + 1` | `integer` → `int32`  |
+
+This maps directly to the CSC (Compressed Sparse Column) format.
 [`reticulate::np_array()`](https://rstudio.github.io/reticulate/reference/np_array.html)
-uses the C buffer protocol to hand a pointer to the existing R memory to
-NumPy. The resulting arrays have `flags.owndata == False`, confirming
-they are views, not copies.
+exposes each slot vector to NumPy without copying:
 
-## Orientation: why we transpose
-
-`dgCMatrix` is genes × cells (R convention: rows are features). AnnData
-uses obs × vars = cells × genes. We call `csc.T` after construction:
-
-``` python
-# csc.T is a csr_matrix of shape (cells, genes)
-# scipy computes this by swapping the CSC ↔ CSR interpretation;
-# no values are re-ordered — flags.owndata remains False.
+``` r
+# Pseudocode — zero-copy slot views
+py_data    <- reticulate::np_array(mat@x, dtype = "float64")  # owndata = FALSE
+py_indices <- reticulate::np_array(mat@i, dtype = "int32")    # owndata = FALSE
+py_indptr  <- reticulate::np_array(mat@p, dtype = "int32")    # owndata = FALSE
+csc <- sp$csc_matrix(
+  reticulate::tuple(py_data, py_indices, py_indptr),
+  shape = reticulate::tuple(nr, nc)
+)
+# SciPy stores references to the NumPy arrays; no further copy occurs.
 ```
+
+### `dgRMatrix` → `scipy.sparse.csr_matrix`
+
+`dgRMatrix` uses the CSR (Compressed Sparse Row) format. The relevant
+slots are:
+
+| Slot | Content                  | R type    |
+|------|--------------------------|-----------|
+| `@x` | non-zero values          | `double`  |
+| `@j` | column indices (0-based) | `integer` |
+| `@p` | row pointers             | `integer` |
+
+These map directly to `csr_matrix((data, indices, indptr), shape=...)`
+with the same zero-copy path as `dgCMatrix`.
+
+### `COO_SparseMatrix` → `scipy.sparse.coo_matrix`
+
+`COO_SparseMatrix` (from the `SparseArray` package) uses:
+
+| Slot      | Content                                        | Notes                          |
+|-----------|------------------------------------------------|--------------------------------|
+| `@nzdata` | non-zero values                                | zero-copy `np_array` view      |
+| `@nzcoo`  | coordinate matrix, shape (nnz, 2), **1-based** | 1→0 conversion requires a copy |
+| `@dim`    | `c(nrow, ncol)`                                |                                |
+
+The coordinate arrays must be decremented from 1-based to 0-based before
+being passed to SciPy. This creates new R integer vectors (one copy each
+for row and column), which are then turned into zero-copy NumPy views.
+The value array `@nzdata` itself is still a zero-copy view.
+
+``` r
+# Coordinate conversion — unavoidable copy for 1→0 base change
+row_0 <- coo@nzcoo[, 1L] - 1L   # new R vector (copy)
+col_0 <- coo@nzcoo[, 2L] - 1L   # new R vector (copy)
+py_row  <- reticulate::np_array(row_0, dtype = "int32")   # view of the new vector
+py_col  <- reticulate::np_array(col_0, dtype = "int32")   # view of the new vector
+py_data <- reticulate::np_array(coo@nzdata, dtype = "float64")  # zero-copy view
+coo_py  <- sp$coo_matrix(
+  reticulate::tuple(py_data, reticulate::tuple(py_row, py_col)),
+  shape = reticulate::tuple(nr, nc)
+)
+```
+
+## Orientation: why we transpose once
+
+R assay matrices are stored features × samples (rows = features, columns
+= samples/cells). AnnData expects `obs × vars = cells × features`. The
+conversion therefore transposes the Python matrix exactly once:
+
+``` r
+X <- se_assay_to_python_matrix(x, assay = assay)  # (features, cells)
+X <- X$T                                            # (cells, features) — zero-copy for sparse
+```
+
+For SciPy sparse matrices, `.T` swaps the stored arrays’ interpretation
+(CSC ↔︎ CSR swap for example) without reordering values; `owndata`
+remains `False`. For NumPy dense arrays, `.T` returns a transposed view
+sharing the same buffer.
 
 ## What CAN force a copy
 
-| Trigger                             | Reason                                      |
-|-------------------------------------|---------------------------------------------|
-| Assay is not `dgCMatrix` on entry   | `as(mat, "dgCMatrix")` may allocate         |
-| `py_to_r(adata$X)`                  | reticulate converts sparse → dense R matrix |
-| `adata.X.toarray()` in Python       | explicit densification                      |
-| Pandas `DataFrame` for obs/var      | unavoidable: R `data.frame` → Python copy   |
-| `scipy.sparse.csc_array` conversion | `.tocsc()` sorts & may copy indices         |
+| Trigger                                           | Reason                                                                          |
+|---------------------------------------------------|---------------------------------------------------------------------------------|
+| Assay is an unsupported class (coercion fallback) | `as(mat, "dgCMatrix")` allocates a new R object                                 |
+| Assay is stored as a raw dense `integer` matrix   | `storage.mode(x) <- "double"` makes a copy                                      |
+| COO coordinate arrays                             | 1 → 0 base conversion requires new integer vectors                              |
+| `obs` / `var` metadata (pandas `DataFrame`)       | R columnar `data.frame` → Python row-oriented; one copy per column, unavoidable |
+| `py_to_r(adata$X)`                                | reticulate converts sparse → dense R matrix                                     |
+| `adata.X.toarray()` or `.todense()` in Python     | explicit densification                                                          |
+| Any `.copy()` call on a SciPy or NumPy object     | explicit copy                                                                   |
 
 ## Lifetime caveat
 
-The Python `csc_matrix` holds a **borrowed pointer** to R memory.
-Ensure:
+Python objects created via the zero-copy path hold **borrowed C
+references** to the underlying R vectors. This applies to any matrix
+class whose slot vectors are exposed via
+[`reticulate::np_array()`](https://rstudio.github.io/reticulate/reference/np_array.html)
+— not only `dgCMatrix`.
 
-1.  The source `dgCMatrix` remains alive (referenced by R) while Python
-    uses it.
-2.  No R code triggers copy-on-modify for the same vector.
-3.  The R garbage collector has not freed the object.
+Ensure that:
 
-In typical single-session usage (SCE → AnnData → model fit → result back
-to R) this is always satisfied.
+1.  The source R matrix object (and therefore its slots) remains alive
+    and referenced by R while Python is using the converted object.
+2.  No R code triggers copy-on-modify on the same vector (standard R
+    copy-on-modify semantics normally protect against this for
+    unmodified objects).
+3.  The R garbage collector has not freed the underlying memory.
 
-## Example
+In typical usage (SCE / SE → AnnData → model fit → results back to R in
+the same session), this is always satisfied as long as `sce` or
+equivalent is held in the R global environment.
+
+## Examples
 
 ``` r
 library(MofaflexR)
@@ -91,25 +221,42 @@ library(SingleCellExperiment)
 library(Matrix)
 
 set.seed(1)
+
+# ---- sparse dgCMatrix example -------------------------------------------
 counts <- rsparsematrix(500, 100, density = 0.05, repr = "C")
-counts <- abs(round(counts))
+counts <- methods::as(abs(round(counts)), "dgCMatrix")
 sce    <- SingleCellExperiment(assays = list(counts = counts))
 colnames(sce) <- paste0("cell", seq_len(ncol(sce)))
 rownames(sce) <- paste0("gene", seq_len(nrow(sce)))
 
-# --- zero-copy CSC matrix (genes x cells) ---
+# Low-level: CSC matrix (features x cells orientation)
 csc <- sce_assay_to_scipy_csc(sce)
 cat("owndata:", reticulate::py_to_r(csc$data$flags$owndata), "\n")
-# owndata: FALSE
+# owndata: FALSE  (zero-copy view)
 
-# --- full AnnData (cells x genes) ---
+# Full AnnData via the generalized bridge (cells x genes)
 rada     <- sce_to_reticulate_anndata(sce)
 py_adata <- rada$py_anndata()
 sp       <- reticulate::import("scipy.sparse", convert = FALSE)
-cat("Shape:   ", unlist(reticulate::py_to_r(py_adata$shape)), "\n")
-cat("Sparse:  ", reticulate::py_to_r(sp$issparse(py_adata$X)), "\n")
-cat("owndata: ", reticulate::py_to_r(py_adata$X$data$flags$owndata), "\n")
-# Shape:    100 500
-# Sparse:   TRUE
-# owndata:  FALSE
+cat("Shape:  ", unlist(reticulate::py_to_r(py_adata$shape)), "\n")  # 100 500
+cat("Sparse: ", reticulate::py_to_r(sp$issparse(py_adata$X)), "\n") # TRUE
+cat("owndata:", reticulate::py_to_r(py_adata$X$data$flags$owndata), "\n") # FALSE
+```
+
+``` r
+library(MofaflexR)
+library(SummarizedExperiment)
+
+# ---- dense dgeMatrix example (e.g. a PCA embedding stored as an assay) ---
+set.seed(2)
+dense_mat <- matrix(rnorm(500 * 50), nrow = 500L, ncol = 50L)  # 500 features x 50 cells
+se <- SummarizedExperiment(assays = list(embedding = dense_mat))
+
+# sce_to_anndata accepts any SummarizedExperiment subclass.
+# The dense assay is converted to a NumPy ndarray via the buffer protocol.
+adata <- sce_to_anndata(se, assay = "embedding")
+
+np <- reticulate::import("numpy", convert = FALSE)
+cat("Shape:     ", unlist(reticulate::py_to_r(adata$shape)), "\n")  # 50 500
+cat("Is ndarray:", reticulate::py_to_r(np$ndim(adata$X)) == 2L, "\n") # TRUE
 ```

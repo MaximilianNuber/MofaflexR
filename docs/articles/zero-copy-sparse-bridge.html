@@ -5,12 +5,12 @@
 <meta charset="utf-8">
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
 <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
-<title>Zero-copy sparse bridge: SingleCellExperiment → scipy.sparse → AnnData • MofaflexR</title>
+<title>Matrix-aware R-to-Python bridge: SummarizedExperiment → NumPy / SciPy → AnnData • MofaflexR</title>
 <script src="../deps/jquery-3.6.0/jquery-3.6.0.min.js"></script><meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
 <link href="../deps/bootstrap-5.3.1/bootstrap.min.css" rel="stylesheet">
 <script src="../deps/bootstrap-5.3.1/bootstrap.bundle.min.js"></script><link href="../deps/font-awesome-6.5.2/css/all.min.css" rel="stylesheet">
 <link href="../deps/font-awesome-6.5.2/css/v4-shims.min.css" rel="stylesheet">
-<script src="../deps/headroom-0.11.0/headroom.min.js"></script><script src="../deps/headroom-0.11.0/jQuery.headroom.min.js"></script><script src="../deps/bootstrap-toc-1.0.1/bootstrap-toc.min.js"></script><script src="../deps/clipboard.js-2.0.11/clipboard.min.js"></script><script src="../deps/search-1.0.0/autocomplete.jquery.min.js"></script><script src="../deps/search-1.0.0/fuse.min.js"></script><script src="../deps/search-1.0.0/mark.min.js"></script><!-- pkgdown --><script src="../pkgdown.js"></script><meta property="og:title" content="Zero-copy sparse bridge: SingleCellExperiment → scipy.sparse → AnnData">
+<script src="../deps/headroom-0.11.0/headroom.min.js"></script><script src="../deps/headroom-0.11.0/jQuery.headroom.min.js"></script><script src="../deps/bootstrap-toc-1.0.1/bootstrap-toc.min.js"></script><script src="../deps/clipboard.js-2.0.11/clipboard.min.js"></script><script src="../deps/search-1.0.0/autocomplete.jquery.min.js"></script><script src="../deps/search-1.0.0/fuse.min.js"></script><script src="../deps/search-1.0.0/mark.min.js"></script><!-- pkgdown --><script src="../pkgdown.js"></script><meta property="og:title" content="Matrix-aware R-to-Python bridge: SummarizedExperiment → NumPy / SciPy → AnnData">
 </head>
 <body>
     <a href="#main" class="visually-hidden-focusable">Skip to contents</a>
@@ -35,7 +35,7 @@
   <ul class="dropdown-menu" aria-labelledby="dropdown-articles">
 <li><a class="dropdown-item" href="../articles/kang-analysis.html">Kang IFN-β PBMC: MOFA-FLEX from R to MOFA2</a></li>
     <li><a class="dropdown-item" href="../articles/multimodal-mudata-bridge.html">Bridging Single-Cell Multi-Omics: SCE and MAE to Python MuData</a></li>
-    <li><a class="dropdown-item" href="../articles/zero-copy-sparse-bridge.html">Zero-copy sparse bridge: SingleCellExperiment → scipy.sparse → AnnData</a></li>
+    <li><a class="dropdown-item" href="../articles/zero-copy-sparse-bridge.html">Matrix-aware R-to-Python bridge: SummarizedExperiment → NumPy / SciPy → AnnData</a></li>
   </ul>
 </li>
 <li class="nav-item"><a class="nav-link" href="../news/index.html">Changelog</a></li>
@@ -57,7 +57,7 @@
 <div class="row">
   <main id="main" class="col-md-9"><div class="page-header">
 
-      <h1>Zero-copy sparse bridge: SingleCellExperiment → scipy.sparse → AnnData</h1>
+      <h1>Matrix-aware R-to-Python bridge: SummarizedExperiment → NumPy / SciPy → AnnData</h1>
                         <h4 data-toc-skip class="author">Maximilian
 Nuber</h4>
             
@@ -71,29 +71,149 @@ Nuber</h4>
 <div class="section level2">
 <h2 id="overview">Overview<a class="anchor" aria-label="anchor" href="#overview"></a>
 </h2>
-<p>This vignette explains how <strong>MofaflexR</strong> converts a
-<code>SingleCellExperiment</code> (SCE) assay stored as a
-<code>Matrix::dgCMatrix</code> into a Python
-<code>scipy.sparse.csc_matrix</code> — without copying the underlying
-data arrays — and then wraps it in an <code>anndata.AnnData</code>
-object accessible from R via
+<p>This vignette explains how <strong>MofaflexR</strong> converts assay
+matrices from a <code>SummarizedExperiment</code> (or any subclass,
+including <code>SingleCellExperiment</code>) into Python NumPy / SciPy
+objects via <code>reticulate</code>, and then wraps the result in an
+<code>anndata.AnnData</code> accessible from R via
 <code><a href="https://anndataR.scverse.org/reference/ReticulateAnnData.html" class="external-link">anndataR::ReticulateAnnData</a></code>.</p>
+<p>The conversion is <strong>dispatch-based</strong>: the package
+inspects the R class of the assay matrix and selects the most
+appropriate Python representation, aiming to avoid unnecessary
+copies.</p>
+<p>Supported input matrix classes:</p>
+<table class="table">
+<colgroup>
+<col width="27%">
+<col width="44%">
+<col width="27%">
+</colgroup>
+<thead><tr class="header">
+<th>R matrix class</th>
+<th>Python target</th>
+<th>Zero-copy behavior</th>
+</tr></thead>
+<tbody>
+<tr class="odd">
+<td><code>matrix</code></td>
+<td><code>numpy.ndarray</code></td>
+<td>Zero-copy where possible via <code>r_to_py</code> buffer
+protocol</td>
+</tr>
+<tr class="even">
+<td><code>dgeMatrix</code></td>
+<td><code>numpy.ndarray</code></td>
+<td>Zero-copy via <code>@x</code> slot + Fortran-order reshape</td>
+</tr>
+<tr class="odd">
+<td><code>dgCMatrix</code></td>
+<td><code>scipy.sparse.csc_matrix</code></td>
+<td>Zero-copy for <code>@x</code>, <code>@i</code>, <code>@p</code> slot
+arrays</td>
+</tr>
+<tr class="even">
+<td><code>dgRMatrix</code></td>
+<td><code>scipy.sparse.csr_matrix</code></td>
+<td>Zero-copy for <code>@x</code>, <code>@j</code>, <code>@p</code> slot
+arrays</td>
+</tr>
+<tr class="odd">
+<td><code>COO_SparseMatrix</code></td>
+<td><code>scipy.sparse.coo_matrix</code></td>
+<td>Zero-copy for values; coordinates require a copy</td>
+</tr>
+<tr class="even">
+<td>Other</td>
+<td>coerced to <code>csc_matrix</code> or <code>ndarray</code>
+</td>
+<td>One R-level copy during coercion</td>
+</tr>
+</tbody>
+</table>
 </div>
 <div class="section level2">
 <h2 id="motivation">Motivation<a class="anchor" aria-label="anchor" href="#motivation"></a>
 </h2>
-<p>Single-cell RNA-seq count matrices can contain tens of millions of
-non-zero entries. Copying such matrices at the R ↔︎ Python boundary
-wastes both memory and time. MofaflexR avoids this by using
-<code><a href="https://rstudio.github.io/reticulate/reference/np_array.html" class="external-link">reticulate::np_array()</a></code>, which exposes R’s contiguous memory
-to NumPy via the <strong>C buffer protocol</strong> without allocating
-new heap storage.</p>
+<p>Single-cell count matrices can contain tens of millions of non-zero
+entries. Copying them at the R ↔︎ Python boundary wastes memory and time.
+Different matrix classes expose memory in different ways; MofaflexR
+picks an appropriate conversion for each:</p>
+<ul>
+<li>
+<strong>Supported sparse formats</strong> store their data, indices,
+and pointers in contiguous R integer/numeric vectors that can be handed
+to NumPy via the C buffer protocol
+(<code><a href="https://rstudio.github.io/reticulate/reference/np_array.html" class="external-link">reticulate::np_array()</a></code>), producing views with
+<code>flags.owndata == False</code>.</li>
+<li>
+<strong>Dense base matrices and <code>dgeMatrix</code></strong>
+store their values as a single contiguous column-major vector which can
+be similarly exposed as a Fortran-order NumPy array.</li>
+<li>
+<strong>COO coordinate matrices</strong> require a 1→0 index-base
+conversion, so the coordinate arrays must be copied; only the value
+array can be a zero-copy view.</li>
+</ul>
 </div>
 <div class="section level2">
-<h2 id="background-dgcmatrix-memory-layout">Background: dgCMatrix memory layout<a class="anchor" aria-label="anchor" href="#background-dgcmatrix-memory-layout"></a>
+<h2 id="how-assay-dispatch-works">How assay dispatch works<a class="anchor" aria-label="anchor" href="#how-assay-dispatch-works"></a>
 </h2>
-<p>A <code>dgCMatrix</code> with <em>m</em> genes (rows) and <em>n</em>
-cells (columns) stores:</p>
+<p>The container-level entry point is <code><a href="../reference/sce_to_anndata.html">sce_to_anndata()</a></code> (and
+its <code><a href="../reference/sce_to_reticulate_anndata.html">sce_to_reticulate_anndata()</a></code> wrapper). Internally, assay
+conversion follows this path:</p>
+<div class="sourceCode" id="cb1"><pre class="downlit sourceCode r">
+<code class="sourceCode R"><span><span class="co"># Conceptual pseudocode</span></span>
+<span><span class="va">X</span> <span class="op">&lt;-</span> <span class="fu">se_assay_to_python_matrix</span><span class="op">(</span><span class="va">x</span>, assay <span class="op">=</span> <span class="va">assay</span>, prefer_sparse <span class="op">=</span> <span class="cn">TRUE</span><span class="op">)</span></span>
+<span><span class="co"># X has shape (n_features, n_samples) — same as the R assay</span></span>
+<span><span class="va">X</span> <span class="op">&lt;-</span> <span class="va">X</span><span class="op">$</span><span class="cn">T</span>   <span class="co"># transpose once: AnnData expects (obs=cells, vars=features)</span></span></code></pre></div>
+<p>The internal dispatcher selects converters by matrix class:</p>
+<div class="sourceCode" id="cb2"><pre class="downlit sourceCode r">
+<code class="sourceCode R"><span><span class="co"># Simplified dispatch logic</span></span>
+<span><span class="kw">if</span> <span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/matrix.html" class="external-link">is.matrix</a></span><span class="op">(</span><span class="va">x</span><span class="op">)</span><span class="op">)</span>                 <span class="kw"><a href="https://rdrr.io/r/base/function.html" class="external-link">return</a></span><span class="op">(</span><span class="fu">.dense_matrix_to_numpy</span><span class="op">(</span><span class="va">x</span><span class="op">)</span><span class="op">)</span></span>
+<span><span class="kw">if</span> <span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/methods/is.html" class="external-link">is</a></span><span class="op">(</span><span class="va">x</span>, <span class="st">"dgeMatrix"</span><span class="op">)</span><span class="op">)</span>           <span class="kw"><a href="https://rdrr.io/r/base/function.html" class="external-link">return</a></span><span class="op">(</span><span class="fu">.dense_matrix_to_numpy</span><span class="op">(</span><span class="va">x</span><span class="op">)</span><span class="op">)</span></span>
+<span><span class="kw">if</span> <span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/methods/is.html" class="external-link">is</a></span><span class="op">(</span><span class="va">x</span>, <span class="st">"dgCMatrix"</span><span class="op">)</span><span class="op">)</span>           <span class="kw"><a href="https://rdrr.io/r/base/function.html" class="external-link">return</a></span><span class="op">(</span><span class="fu">.dgCMatrix_to_scipy_csc</span><span class="op">(</span><span class="va">x</span><span class="op">)</span><span class="op">)</span></span>
+<span><span class="kw">if</span> <span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/methods/is.html" class="external-link">is</a></span><span class="op">(</span><span class="va">x</span>, <span class="st">"dgRMatrix"</span><span class="op">)</span><span class="op">)</span>           <span class="kw"><a href="https://rdrr.io/r/base/function.html" class="external-link">return</a></span><span class="op">(</span><span class="fu">.dgRMatrix_to_scipy_csr</span><span class="op">(</span><span class="va">x</span><span class="op">)</span><span class="op">)</span></span>
+<span><span class="kw">if</span> <span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/methods/is.html" class="external-link">is</a></span><span class="op">(</span><span class="va">x</span>, <span class="st">"COO_SparseArray"</span><span class="op">)</span><span class="op">)</span>     <span class="kw"><a href="https://rdrr.io/r/base/function.html" class="external-link">return</a></span><span class="op">(</span><span class="fu">.coo_matrix_to_scipy_coo</span><span class="op">(</span><span class="va">x</span><span class="op">)</span><span class="op">)</span></span>
+<span><span class="co"># fallback: coerce to dgCMatrix or densify, then convert</span></span></code></pre></div>
+</div>
+<div class="section level2">
+<h2 id="dense-matrix-conversion">Dense matrix conversion<a class="anchor" aria-label="anchor" href="#dense-matrix-conversion"></a>
+</h2>
+<div class="section level3">
+<h3 id="base-matrix">Base <code>matrix</code><a class="anchor" aria-label="anchor" href="#base-matrix"></a>
+</h3>
+<div class="sourceCode" id="cb3"><pre class="downlit sourceCode r">
+<code class="sourceCode R"><span><span class="co"># r_to_py on a base R matrix uses NumPy's buffer protocol.</span></span>
+<span><span class="co"># The result is a Fortran-order float64 ndarray; owndata = FALSE.</span></span>
+<span><span class="co"># (Observed behavior; the reticulate API does not formally guarantee it,</span></span>
+<span><span class="co"># but it is stable in practice across current versions.)</span></span>
+<span><span class="va">arr</span> <span class="op">&lt;-</span> <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/r-py-conversion.html" class="external-link">r_to_py</a></span><span class="op">(</span><span class="va">mat</span><span class="op">)</span>  <span class="co"># shape (nrow, ncol), owndata = FALSE</span></span></code></pre></div>
+<p>R matrices are column-major; NumPy’s Fortran order matches this
+layout, so no reordering is needed and no copy occurs during the
+conversion itself.</p>
+</div>
+<div class="section level3">
+<h3 id="dgematrix">
+<code>dgeMatrix</code><a class="anchor" aria-label="anchor" href="#dgematrix"></a>
+</h3>
+<p><code>dgeMatrix</code> stores its values in a plain <code>@x</code>
+slot (a column-major numeric vector), plus <code>@Dim</code>. The
+conversion exposes <code>@x</code> as a 1-D zero-copy view, then calls
+<code>.reshape((nr, nc), order = "F")</code>. Because the 1-D buffer is
+already laid out in column-major order, NumPy’s reshape returns a
+Fortran-contiguous 2-D <strong>view</strong>
+(<code>owndata = FALSE</code>); no copy is made.</p>
+</div>
+</div>
+<div class="section level2">
+<h2 id="sparse-matrix-conversion">Sparse matrix conversion<a class="anchor" aria-label="anchor" href="#sparse-matrix-conversion"></a>
+</h2>
+<div class="section level3">
+<h3 id="dgcmatrix-scipy-sparse-csc_matrix">
+<code>dgCMatrix</code> → <code>scipy.sparse.csc_matrix</code><a class="anchor" aria-label="anchor" href="#dgcmatrix-scipy-sparse-csc_matrix"></a>
+</h3>
+<p>A <code>dgCMatrix</code> with <em>m</em> features (rows) and
+<em>n</em> samples (columns) stores:</p>
 <table class="table">
 <colgroup>
 <col width="19%">
@@ -110,57 +230,148 @@ cells (columns) stores:</p>
 <tbody>
 <tr class="odd">
 <td><code>@x</code></td>
-<td>non-zero values (column-major)</td>
+<td>non-zero values</td>
 <td><code>nnz</code></td>
 <td>
-<code>numeric</code> (double, 8 bytes)</td>
+<code>double</code> → <code>float64</code>
+</td>
 </tr>
 <tr class="even">
 <td><code>@i</code></td>
-<td>row indices of each <code>@x</code> entry (0-based)</td>
+<td>row indices (0-based)</td>
 <td><code>nnz</code></td>
 <td>
-<code>integer</code> (int32, 4 bytes)</td>
+<code>integer</code> → <code>int32</code>
+</td>
 </tr>
 <tr class="odd">
 <td><code>@p</code></td>
-<td>column pointer: <code>@p[j]</code> = index into <code>@x</code>
-where col <code>j</code> starts</td>
+<td>column pointers (<code>@p[j]</code> = start of col <code>j</code> in
+<code>@x</code>)</td>
 <td><code>n + 1</code></td>
 <td>
-<code>integer</code> (int32, 4 bytes)</td>
+<code>integer</code> → <code>int32</code>
+</td>
 </tr>
 </tbody>
 </table>
-<p>This is exactly the CSC (Compressed Sparse Column) format used by
-<code>scipy.sparse.csc_matrix</code>.</p>
+<p>This maps directly to the CSC (Compressed Sparse Column) format.
+<code><a href="https://rstudio.github.io/reticulate/reference/np_array.html" class="external-link">reticulate::np_array()</a></code> exposes each slot vector to NumPy
+without copying:</p>
+<div class="sourceCode" id="cb4"><pre class="downlit sourceCode r">
+<code class="sourceCode R"><span><span class="co"># Pseudocode — zero-copy slot views</span></span>
+<span><span class="va">py_data</span>    <span class="op">&lt;-</span> <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/np_array.html" class="external-link">np_array</a></span><span class="op">(</span><span class="va">mat</span><span class="op">@</span><span class="va">x</span>, dtype <span class="op">=</span> <span class="st">"float64"</span><span class="op">)</span>  <span class="co"># owndata = FALSE</span></span>
+<span><span class="va">py_indices</span> <span class="op">&lt;-</span> <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/np_array.html" class="external-link">np_array</a></span><span class="op">(</span><span class="va">mat</span><span class="op">@</span><span class="va">i</span>, dtype <span class="op">=</span> <span class="st">"int32"</span><span class="op">)</span>    <span class="co"># owndata = FALSE</span></span>
+<span><span class="va">py_indptr</span>  <span class="op">&lt;-</span> <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/np_array.html" class="external-link">np_array</a></span><span class="op">(</span><span class="va">mat</span><span class="op">@</span><span class="va">p</span>, dtype <span class="op">=</span> <span class="st">"int32"</span><span class="op">)</span>    <span class="co"># owndata = FALSE</span></span>
+<span><span class="va">csc</span> <span class="op">&lt;-</span> <span class="va">sp</span><span class="op">$</span><span class="fu">csc_matrix</span><span class="op">(</span></span>
+<span>  <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/tuple.html" class="external-link">tuple</a></span><span class="op">(</span><span class="va">py_data</span>, <span class="va">py_indices</span>, <span class="va">py_indptr</span><span class="op">)</span>,</span>
+<span>  shape <span class="op">=</span> <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/tuple.html" class="external-link">tuple</a></span><span class="op">(</span><span class="va">nr</span>, <span class="va">nc</span><span class="op">)</span></span>
+<span><span class="op">)</span></span>
+<span><span class="co"># SciPy stores references to the NumPy arrays; no further copy occurs.</span></span></code></pre></div>
+</div>
+<div class="section level3">
+<h3 id="dgrmatrix-scipy-sparse-csr_matrix">
+<code>dgRMatrix</code> → <code>scipy.sparse.csr_matrix</code><a class="anchor" aria-label="anchor" href="#dgrmatrix-scipy-sparse-csr_matrix"></a>
+</h3>
+<p><code>dgRMatrix</code> uses the CSR (Compressed Sparse Row) format.
+The relevant slots are:</p>
+<table class="table">
+<thead><tr class="header">
+<th>Slot</th>
+<th>Content</th>
+<th>R type</th>
+</tr></thead>
+<tbody>
+<tr class="odd">
+<td><code>@x</code></td>
+<td>non-zero values</td>
+<td><code>double</code></td>
+</tr>
+<tr class="even">
+<td><code>@j</code></td>
+<td>column indices (0-based)</td>
+<td><code>integer</code></td>
+</tr>
+<tr class="odd">
+<td><code>@p</code></td>
+<td>row pointers</td>
+<td><code>integer</code></td>
+</tr>
+</tbody>
+</table>
+<p>These map directly to
+<code>csr_matrix((data, indices, indptr), shape=...)</code> with the
+same zero-copy path as <code>dgCMatrix</code>.</p>
+</div>
+<div class="section level3">
+<h3 id="coo_sparsematrix-scipy-sparse-coo_matrix">
+<code>COO_SparseMatrix</code> →
+<code>scipy.sparse.coo_matrix</code><a class="anchor" aria-label="anchor" href="#coo_sparsematrix-scipy-sparse-coo_matrix"></a>
+</h3>
+<p><code>COO_SparseMatrix</code> (from the <code>SparseArray</code>
+package) uses:</p>
+<table class="table">
+<colgroup>
+<col width="27%">
+<col width="40%">
+<col width="31%">
+</colgroup>
+<thead><tr class="header">
+<th>Slot</th>
+<th>Content</th>
+<th>Notes</th>
+</tr></thead>
+<tbody>
+<tr class="odd">
+<td><code>@nzdata</code></td>
+<td>non-zero values</td>
+<td>zero-copy <code>np_array</code> view</td>
+</tr>
+<tr class="even">
+<td><code>@nzcoo</code></td>
+<td>coordinate matrix, shape (nnz, 2), <strong>1-based</strong>
+</td>
+<td>1→0 conversion requires a copy</td>
+</tr>
+<tr class="odd">
+<td><code>@dim</code></td>
+<td><code>c(nrow, ncol)</code></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>The coordinate arrays must be decremented from 1-based to 0-based
+before being passed to SciPy. This creates new R integer vectors (one
+copy each for row and column), which are then turned into zero-copy
+NumPy views. The value array <code>@nzdata</code> itself is still a
+zero-copy view.</p>
+<div class="sourceCode" id="cb5"><pre class="downlit sourceCode r">
+<code class="sourceCode R"><span><span class="co"># Coordinate conversion — unavoidable copy for 1→0 base change</span></span>
+<span><span class="va">row_0</span> <span class="op">&lt;-</span> <span class="va">coo</span><span class="op">@</span><span class="va">nzcoo</span><span class="op">[</span>, <span class="fl">1L</span><span class="op">]</span> <span class="op">-</span> <span class="fl">1L</span>   <span class="co"># new R vector (copy)</span></span>
+<span><span class="va">col_0</span> <span class="op">&lt;-</span> <span class="va">coo</span><span class="op">@</span><span class="va">nzcoo</span><span class="op">[</span>, <span class="fl">2L</span><span class="op">]</span> <span class="op">-</span> <span class="fl">1L</span>   <span class="co"># new R vector (copy)</span></span>
+<span><span class="va">py_row</span>  <span class="op">&lt;-</span> <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/np_array.html" class="external-link">np_array</a></span><span class="op">(</span><span class="va">row_0</span>, dtype <span class="op">=</span> <span class="st">"int32"</span><span class="op">)</span>   <span class="co"># view of the new vector</span></span>
+<span><span class="va">py_col</span>  <span class="op">&lt;-</span> <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/np_array.html" class="external-link">np_array</a></span><span class="op">(</span><span class="va">col_0</span>, dtype <span class="op">=</span> <span class="st">"int32"</span><span class="op">)</span>   <span class="co"># view of the new vector</span></span>
+<span><span class="va">py_data</span> <span class="op">&lt;-</span> <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/np_array.html" class="external-link">np_array</a></span><span class="op">(</span><span class="va">coo</span><span class="op">@</span><span class="va">nzdata</span>, dtype <span class="op">=</span> <span class="st">"float64"</span><span class="op">)</span>  <span class="co"># zero-copy view</span></span>
+<span><span class="va">coo_py</span>  <span class="op">&lt;-</span> <span class="va">sp</span><span class="op">$</span><span class="fu">coo_matrix</span><span class="op">(</span></span>
+<span>  <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/tuple.html" class="external-link">tuple</a></span><span class="op">(</span><span class="va">py_data</span>, <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/tuple.html" class="external-link">tuple</a></span><span class="op">(</span><span class="va">py_row</span>, <span class="va">py_col</span><span class="op">)</span><span class="op">)</span>,</span>
+<span>  shape <span class="op">=</span> <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/tuple.html" class="external-link">tuple</a></span><span class="op">(</span><span class="va">nr</span>, <span class="va">nc</span><span class="op">)</span></span>
+<span><span class="op">)</span></span></code></pre></div>
+</div>
 </div>
 <div class="section level2">
-<h2 id="how-sce_assay_to_scipy_csc-works">How <code>sce_assay_to_scipy_csc()</code> works<a class="anchor" aria-label="anchor" href="#how-sce_assay_to_scipy_csc-works"></a>
+<h2 id="orientation-why-we-transpose-once">Orientation: why we transpose once<a class="anchor" aria-label="anchor" href="#orientation-why-we-transpose-once"></a>
 </h2>
-<div class="sourceCode" id="cb1"><pre class="downlit sourceCode r">
-<code class="sourceCode R"><span><span class="co"># Pseudocode (simplified)</span></span>
-<span><span class="va">sp</span>         <span class="op">&lt;-</span> <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/import.html" class="external-link">import</a></span><span class="op">(</span><span class="st">"scipy.sparse"</span>, convert <span class="op">=</span> <span class="cn">FALSE</span><span class="op">)</span></span>
-<span><span class="va">py_data</span>    <span class="op">&lt;-</span> <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/np_array.html" class="external-link">np_array</a></span><span class="op">(</span><span class="va">mat</span><span class="op">@</span><span class="va">x</span>, dtype <span class="op">=</span> <span class="st">"float64"</span><span class="op">)</span>  <span class="co"># no copy</span></span>
-<span><span class="va">py_indices</span> <span class="op">&lt;-</span> <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/np_array.html" class="external-link">np_array</a></span><span class="op">(</span><span class="va">mat</span><span class="op">@</span><span class="va">i</span>, dtype <span class="op">=</span> <span class="st">"int32"</span><span class="op">)</span>    <span class="co"># no copy</span></span>
-<span><span class="va">py_indptr</span>  <span class="op">&lt;-</span> <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/np_array.html" class="external-link">np_array</a></span><span class="op">(</span><span class="va">mat</span><span class="op">@</span><span class="va">p</span>, dtype <span class="op">=</span> <span class="st">"int32"</span><span class="op">)</span>    <span class="co"># no copy</span></span>
-<span><span class="va">shape</span>      <span class="op">&lt;-</span> <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/tuple.html" class="external-link">tuple</a></span><span class="op">(</span><span class="va">nr</span>, <span class="va">nc</span><span class="op">)</span></span>
-<span><span class="va">csc</span>        <span class="op">&lt;-</span> <span class="va">sp</span><span class="op">$</span><span class="fu">csc_matrix</span><span class="op">(</span><span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/tuple.html" class="external-link">tuple</a></span><span class="op">(</span><span class="va">py_data</span>, <span class="va">py_indices</span>, <span class="va">py_indptr</span><span class="op">)</span>,</span>
-<span>                             shape <span class="op">=</span> <span class="va">shape</span><span class="op">)</span></span></code></pre></div>
-<p><code><a href="https://rstudio.github.io/reticulate/reference/np_array.html" class="external-link">reticulate::np_array()</a></code> uses the C buffer protocol to
-hand a pointer to the existing R memory to NumPy. The resulting arrays
-have <code>flags.owndata == False</code>, confirming they are views, not
-copies.</p>
-</div>
-<div class="section level2">
-<h2 id="orientation-why-we-transpose">Orientation: why we transpose<a class="anchor" aria-label="anchor" href="#orientation-why-we-transpose"></a>
-</h2>
-<p><code>dgCMatrix</code> is genes × cells (R convention: rows are
-features). AnnData uses obs × vars = cells × genes. We call
-<code>csc.T</code> after construction:</p>
-<div class="sourceCode" id="cb2"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a><span class="co"># csc.T is a csr_matrix of shape (cells, genes)</span></span>
-<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a><span class="co"># scipy computes this by swapping the CSC ↔ CSR interpretation;</span></span>
-<span id="cb2-3"><a href="#cb2-3" tabindex="-1"></a><span class="co"># no values are re-ordered — flags.owndata remains False.</span></span></code></pre></div>
+<p>R assay matrices are stored features × samples (rows = features,
+columns = samples/cells). AnnData expects
+<code>obs × vars = cells × features</code>. The conversion therefore
+transposes the Python matrix exactly once:</p>
+<div class="sourceCode" id="cb6"><pre class="downlit sourceCode r">
+<code class="sourceCode R"><span><span class="va">X</span> <span class="op">&lt;-</span> <span class="fu">se_assay_to_python_matrix</span><span class="op">(</span><span class="va">x</span>, assay <span class="op">=</span> <span class="va">assay</span><span class="op">)</span>  <span class="co"># (features, cells)</span></span>
+<span><span class="va">X</span> <span class="op">&lt;-</span> <span class="va">X</span><span class="op">$</span><span class="cn">T</span>                                            <span class="co"># (cells, features) — zero-copy for sparse</span></span></code></pre></div>
+<p>For SciPy sparse matrices, <code>.T</code> swaps the stored arrays’
+interpretation (CSC ↔︎ CSR swap for example) without reordering values;
+<code>owndata</code> remains <code>False</code>. For NumPy dense arrays,
+<code>.T</code> returns a transposed view sharing the same buffer.</p>
 </div>
 <div class="section level2">
 <h2 id="what-can-force-a-copy">What CAN force a copy<a class="anchor" aria-label="anchor" href="#what-can-force-a-copy"></a>
@@ -176,28 +387,39 @@ features). AnnData uses obs × vars = cells × genes. We call
 </tr></thead>
 <tbody>
 <tr class="odd">
-<td>Assay is not <code>dgCMatrix</code> on entry</td>
+<td>Assay is an unsupported class (coercion fallback)</td>
 <td>
-<code>as(mat, "dgCMatrix")</code> may allocate</td>
+<code>as(mat, "dgCMatrix")</code> allocates a new R object</td>
 </tr>
 <tr class="even">
+<td>Assay is stored as a raw dense <code>integer</code> matrix</td>
+<td>
+<code>storage.mode(x) &lt;- "double"</code> makes a copy</td>
+</tr>
+<tr class="odd">
+<td>COO coordinate arrays</td>
+<td>1 → 0 base conversion requires new integer vectors</td>
+</tr>
+<tr class="even">
+<td>
+<code>obs</code> / <code>var</code> metadata (pandas
+<code>DataFrame</code>)</td>
+<td>R columnar <code>data.frame</code> → Python row-oriented; one copy
+per column, unavoidable</td>
+</tr>
+<tr class="odd">
 <td><code>py_to_r(adata$X)</code></td>
 <td>reticulate converts sparse → dense R matrix</td>
 </tr>
-<tr class="odd">
+<tr class="even">
 <td>
-<code>adata.X.toarray()</code> in Python</td>
+<code>adata.X.toarray()</code> or <code>.todense()</code> in
+Python</td>
 <td>explicit densification</td>
 </tr>
-<tr class="even">
-<td>Pandas <code>DataFrame</code> for obs/var</td>
-<td>unavoidable: R <code>data.frame</code> → Python copy</td>
-</tr>
 <tr class="odd">
-<td>
-<code>scipy.sparse.csc_array</code> conversion</td>
-<td>
-<code>.tocsc()</code> sorts &amp; may copy indices</td>
+<td>Any <code>.copy()</code> call on a SciPy or NumPy object</td>
+<td>explicit copy</td>
 </tr>
 </tbody>
 </table>
@@ -205,47 +427,69 @@ features). AnnData uses obs × vars = cells × genes. We call
 <div class="section level2">
 <h2 id="lifetime-caveat">Lifetime caveat<a class="anchor" aria-label="anchor" href="#lifetime-caveat"></a>
 </h2>
-<p>The Python <code>csc_matrix</code> holds a <strong>borrowed
-pointer</strong> to R memory. Ensure:</p>
+<p>Python objects created via the zero-copy path hold <strong>borrowed C
+references</strong> to the underlying R vectors. This applies to any
+matrix class whose slot vectors are exposed via
+<code><a href="https://rstudio.github.io/reticulate/reference/np_array.html" class="external-link">reticulate::np_array()</a></code> — not only
+<code>dgCMatrix</code>.</p>
+<p>Ensure that:</p>
 <ol style="list-style-type: decimal">
-<li>The source <code>dgCMatrix</code> remains alive (referenced by R)
-while Python uses it.</li>
-<li>No R code triggers copy-on-modify for the same vector.</li>
-<li>The R garbage collector has not freed the object.</li>
+<li>The source R matrix object (and therefore its slots) remains alive
+and referenced by R while Python is using the converted object.</li>
+<li>No R code triggers copy-on-modify on the same vector (standard R
+copy-on-modify semantics normally protect against this for unmodified
+objects).</li>
+<li>The R garbage collector has not freed the underlying memory.</li>
 </ol>
-<p>In typical single-session usage (SCE → AnnData → model fit → result
-back to R) this is always satisfied.</p>
+<p>In typical usage (SCE / SE → AnnData → model fit → results back to R
+in the same session), this is always satisfied as long as
+<code>sce</code> or equivalent is held in the R global environment.</p>
 </div>
 <div class="section level2">
-<h2 id="example">Example<a class="anchor" aria-label="anchor" href="#example"></a>
+<h2 id="examples">Examples<a class="anchor" aria-label="anchor" href="#examples"></a>
 </h2>
-<div class="sourceCode" id="cb3"><pre class="downlit sourceCode r">
+<div class="sourceCode" id="cb7"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="kw"><a href="https://rdrr.io/r/base/library.html" class="external-link">library</a></span><span class="op">(</span><span class="va">MofaflexR</span><span class="op">)</span></span>
 <span><span class="kw"><a href="https://rdrr.io/r/base/library.html" class="external-link">library</a></span><span class="op">(</span><span class="va">SingleCellExperiment</span><span class="op">)</span></span>
 <span><span class="kw"><a href="https://rdrr.io/r/base/library.html" class="external-link">library</a></span><span class="op">(</span><span class="va"><a href="https://Matrix.R-forge.R-project.org" class="external-link">Matrix</a></span><span class="op">)</span></span>
 <span></span>
 <span><span class="fu"><a href="https://rdrr.io/r/base/Random.html" class="external-link">set.seed</a></span><span class="op">(</span><span class="fl">1</span><span class="op">)</span></span>
+<span></span>
+<span><span class="co"># ---- sparse dgCMatrix example -------------------------------------------</span></span>
 <span><span class="va">counts</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/pkg/Matrix/man/rsparsematrix.html" class="external-link">rsparsematrix</a></span><span class="op">(</span><span class="fl">500</span>, <span class="fl">100</span>, density <span class="op">=</span> <span class="fl">0.05</span>, repr <span class="op">=</span> <span class="st">"C"</span><span class="op">)</span></span>
-<span><span class="va">counts</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/r/base/MathFun.html" class="external-link">abs</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/Round.html" class="external-link">round</a></span><span class="op">(</span><span class="va">counts</span><span class="op">)</span><span class="op">)</span></span>
+<span><span class="va">counts</span> <span class="op">&lt;-</span> <span class="fu">methods</span><span class="fu">::</span><span class="fu"><a href="https://rdrr.io/r/methods/as.html" class="external-link">as</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/MathFun.html" class="external-link">abs</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/Round.html" class="external-link">round</a></span><span class="op">(</span><span class="va">counts</span><span class="op">)</span><span class="op">)</span>, <span class="st">"dgCMatrix"</span><span class="op">)</span></span>
 <span><span class="va">sce</span>    <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/pkg/SingleCellExperiment/man/SingleCellExperiment.html" class="external-link">SingleCellExperiment</a></span><span class="op">(</span>assays <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/list.html" class="external-link">list</a></span><span class="op">(</span>counts <span class="op">=</span> <span class="va">counts</span><span class="op">)</span><span class="op">)</span></span>
 <span><span class="fu"><a href="https://rdrr.io/pkg/BiocGenerics/man/row_colnames.html" class="external-link">colnames</a></span><span class="op">(</span><span class="va">sce</span><span class="op">)</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/r/base/paste.html" class="external-link">paste0</a></span><span class="op">(</span><span class="st">"cell"</span>, <span class="fu"><a href="https://rdrr.io/r/base/seq.html" class="external-link">seq_len</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/pkg/BiocGenerics/man/nrow.html" class="external-link">ncol</a></span><span class="op">(</span><span class="va">sce</span><span class="op">)</span><span class="op">)</span><span class="op">)</span></span>
 <span><span class="fu"><a href="https://rdrr.io/pkg/BiocGenerics/man/row_colnames.html" class="external-link">rownames</a></span><span class="op">(</span><span class="va">sce</span><span class="op">)</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/r/base/paste.html" class="external-link">paste0</a></span><span class="op">(</span><span class="st">"gene"</span>, <span class="fu"><a href="https://rdrr.io/r/base/seq.html" class="external-link">seq_len</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/pkg/BiocGenerics/man/nrow.html" class="external-link">nrow</a></span><span class="op">(</span><span class="va">sce</span><span class="op">)</span><span class="op">)</span><span class="op">)</span></span>
 <span></span>
-<span><span class="co"># --- zero-copy CSC matrix (genes x cells) ---</span></span>
+<span><span class="co"># Low-level: CSC matrix (features x cells orientation)</span></span>
 <span><span class="va">csc</span> <span class="op">&lt;-</span> <span class="fu"><a href="../reference/sce_assay_to_scipy_csc.html">sce_assay_to_scipy_csc</a></span><span class="op">(</span><span class="va">sce</span><span class="op">)</span></span>
 <span><span class="fu"><a href="https://rdrr.io/r/base/cat.html" class="external-link">cat</a></span><span class="op">(</span><span class="st">"owndata:"</span>, <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/r-py-conversion.html" class="external-link">py_to_r</a></span><span class="op">(</span><span class="va">csc</span><span class="op">$</span><span class="va">data</span><span class="op">$</span><span class="va">flags</span><span class="op">$</span><span class="va">owndata</span><span class="op">)</span>, <span class="st">"\n"</span><span class="op">)</span></span>
-<span><span class="co"># owndata: FALSE</span></span>
+<span><span class="co"># owndata: FALSE  (zero-copy view)</span></span>
 <span></span>
-<span><span class="co"># --- full AnnData (cells x genes) ---</span></span>
+<span><span class="co"># Full AnnData via the generalized bridge (cells x genes)</span></span>
 <span><span class="va">rada</span>     <span class="op">&lt;-</span> <span class="fu"><a href="../reference/sce_to_reticulate_anndata.html">sce_to_reticulate_anndata</a></span><span class="op">(</span><span class="va">sce</span><span class="op">)</span></span>
 <span><span class="va">py_adata</span> <span class="op">&lt;-</span> <span class="va">rada</span><span class="op">$</span><span class="fu">py_anndata</span><span class="op">(</span><span class="op">)</span></span>
 <span><span class="va">sp</span>       <span class="op">&lt;-</span> <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/import.html" class="external-link">import</a></span><span class="op">(</span><span class="st">"scipy.sparse"</span>, convert <span class="op">=</span> <span class="cn">FALSE</span><span class="op">)</span></span>
-<span><span class="fu"><a href="https://rdrr.io/r/base/cat.html" class="external-link">cat</a></span><span class="op">(</span><span class="st">"Shape:   "</span>, <span class="fu"><a href="https://rdrr.io/pkg/BiocGenerics/man/unlist.html" class="external-link">unlist</a></span><span class="op">(</span><span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/r-py-conversion.html" class="external-link">py_to_r</a></span><span class="op">(</span><span class="va">py_adata</span><span class="op">$</span><span class="va">shape</span><span class="op">)</span><span class="op">)</span>, <span class="st">"\n"</span><span class="op">)</span></span>
-<span><span class="fu"><a href="https://rdrr.io/r/base/cat.html" class="external-link">cat</a></span><span class="op">(</span><span class="st">"Sparse:  "</span>, <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/r-py-conversion.html" class="external-link">py_to_r</a></span><span class="op">(</span><span class="va">sp</span><span class="op">$</span><span class="fu">issparse</span><span class="op">(</span><span class="va">py_adata</span><span class="op">$</span><span class="va">X</span><span class="op">)</span><span class="op">)</span>, <span class="st">"\n"</span><span class="op">)</span></span>
-<span><span class="fu"><a href="https://rdrr.io/r/base/cat.html" class="external-link">cat</a></span><span class="op">(</span><span class="st">"owndata: "</span>, <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/r-py-conversion.html" class="external-link">py_to_r</a></span><span class="op">(</span><span class="va">py_adata</span><span class="op">$</span><span class="va">X</span><span class="op">$</span><span class="va">data</span><span class="op">$</span><span class="va">flags</span><span class="op">$</span><span class="va">owndata</span><span class="op">)</span>, <span class="st">"\n"</span><span class="op">)</span></span>
-<span><span class="co"># Shape:    100 500</span></span>
-<span><span class="co"># Sparse:   TRUE</span></span>
-<span><span class="co"># owndata:  FALSE</span></span></code></pre></div>
+<span><span class="fu"><a href="https://rdrr.io/r/base/cat.html" class="external-link">cat</a></span><span class="op">(</span><span class="st">"Shape:  "</span>, <span class="fu"><a href="https://rdrr.io/pkg/BiocGenerics/man/unlist.html" class="external-link">unlist</a></span><span class="op">(</span><span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/r-py-conversion.html" class="external-link">py_to_r</a></span><span class="op">(</span><span class="va">py_adata</span><span class="op">$</span><span class="va">shape</span><span class="op">)</span><span class="op">)</span>, <span class="st">"\n"</span><span class="op">)</span>  <span class="co"># 100 500</span></span>
+<span><span class="fu"><a href="https://rdrr.io/r/base/cat.html" class="external-link">cat</a></span><span class="op">(</span><span class="st">"Sparse: "</span>, <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/r-py-conversion.html" class="external-link">py_to_r</a></span><span class="op">(</span><span class="va">sp</span><span class="op">$</span><span class="fu">issparse</span><span class="op">(</span><span class="va">py_adata</span><span class="op">$</span><span class="va">X</span><span class="op">)</span><span class="op">)</span>, <span class="st">"\n"</span><span class="op">)</span> <span class="co"># TRUE</span></span>
+<span><span class="fu"><a href="https://rdrr.io/r/base/cat.html" class="external-link">cat</a></span><span class="op">(</span><span class="st">"owndata:"</span>, <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/r-py-conversion.html" class="external-link">py_to_r</a></span><span class="op">(</span><span class="va">py_adata</span><span class="op">$</span><span class="va">X</span><span class="op">$</span><span class="va">data</span><span class="op">$</span><span class="va">flags</span><span class="op">$</span><span class="va">owndata</span><span class="op">)</span>, <span class="st">"\n"</span><span class="op">)</span> <span class="co"># FALSE</span></span></code></pre></div>
+<div class="sourceCode" id="cb8"><pre class="downlit sourceCode r">
+<code class="sourceCode R"><span><span class="kw"><a href="https://rdrr.io/r/base/library.html" class="external-link">library</a></span><span class="op">(</span><span class="va">MofaflexR</span><span class="op">)</span></span>
+<span><span class="kw"><a href="https://rdrr.io/r/base/library.html" class="external-link">library</a></span><span class="op">(</span><span class="va"><a href="https://bioconductor.org/packages/SummarizedExperiment" class="external-link">SummarizedExperiment</a></span><span class="op">)</span></span>
+<span></span>
+<span><span class="co"># ---- dense dgeMatrix example (e.g. a PCA embedding stored as an assay) ---</span></span>
+<span><span class="fu"><a href="https://rdrr.io/r/base/Random.html" class="external-link">set.seed</a></span><span class="op">(</span><span class="fl">2</span><span class="op">)</span></span>
+<span><span class="va">dense_mat</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/r/base/matrix.html" class="external-link">matrix</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/stats/Normal.html" class="external-link">rnorm</a></span><span class="op">(</span><span class="fl">500</span> <span class="op">*</span> <span class="fl">50</span><span class="op">)</span>, nrow <span class="op">=</span> <span class="fl">500L</span>, ncol <span class="op">=</span> <span class="fl">50L</span><span class="op">)</span>  <span class="co"># 500 features x 50 cells</span></span>
+<span><span class="va">se</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/pkg/SummarizedExperiment/man/SummarizedExperiment-class.html" class="external-link">SummarizedExperiment</a></span><span class="op">(</span>assays <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/list.html" class="external-link">list</a></span><span class="op">(</span>embedding <span class="op">=</span> <span class="va">dense_mat</span><span class="op">)</span><span class="op">)</span></span>
+<span></span>
+<span><span class="co"># sce_to_anndata accepts any SummarizedExperiment subclass.</span></span>
+<span><span class="co"># The dense assay is converted to a NumPy ndarray via the buffer protocol.</span></span>
+<span><span class="va">adata</span> <span class="op">&lt;-</span> <span class="fu"><a href="../reference/sce_to_anndata.html">sce_to_anndata</a></span><span class="op">(</span><span class="va">se</span>, assay <span class="op">=</span> <span class="st">"embedding"</span><span class="op">)</span></span>
+<span></span>
+<span><span class="va">np</span> <span class="op">&lt;-</span> <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/import.html" class="external-link">import</a></span><span class="op">(</span><span class="st">"numpy"</span>, convert <span class="op">=</span> <span class="cn">FALSE</span><span class="op">)</span></span>
+<span><span class="fu"><a href="https://rdrr.io/r/base/cat.html" class="external-link">cat</a></span><span class="op">(</span><span class="st">"Shape:     "</span>, <span class="fu"><a href="https://rdrr.io/pkg/BiocGenerics/man/unlist.html" class="external-link">unlist</a></span><span class="op">(</span><span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/r-py-conversion.html" class="external-link">py_to_r</a></span><span class="op">(</span><span class="va">adata</span><span class="op">$</span><span class="va">shape</span><span class="op">)</span><span class="op">)</span>, <span class="st">"\n"</span><span class="op">)</span>  <span class="co"># 50 500</span></span>
+<span><span class="fu"><a href="https://rdrr.io/r/base/cat.html" class="external-link">cat</a></span><span class="op">(</span><span class="st">"Is ndarray:"</span>, <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/r-py-conversion.html" class="external-link">py_to_r</a></span><span class="op">(</span><span class="va">np</span><span class="op">$</span><span class="fu">ndim</span><span class="op">(</span><span class="va">adata</span><span class="op">$</span><span class="va">X</span><span class="op">)</span><span class="op">)</span> <span class="op">==</span> <span class="fl">2L</span>, <span class="st">"\n"</span><span class="op">)</span> <span class="co"># TRUE</span></span></code></pre></div>
 </div>
   </main><aside class="col-md-3"><nav id="toc" aria-label="Table of contents"><h2>On this page</h2>
     </nav></aside>

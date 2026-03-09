@@ -2,13 +2,24 @@
 
 **Fit MOFAFlex models from R via basilisk + reticulate.**
 
-MofaflexR provides an R-native bridge between
-[SingleCellExperiment](https://bioconductor.org/packages/SingleCellExperiment/)
-objects and the Python [MOFAFlex](https://github.com/bioFAM/mofaflex)
-package for multi-omics factor analysis. The key contribution is a
-**zero-copy sparse bridge**: count matrices stored as
-`Matrix::dgCMatrix` are exposed to Python `scipy.sparse` without
-densifying or allocating a second copy of the data.
+MofaflexR provides an R-native bridge between Bioconductor assay
+containers and the Python [MOFAFlex](https://github.com/bioFAM/mofaflex)
+package for multi-omics factor analysis. The package converts assay
+matrices from `SummarizedExperiment` / `SingleCellExperiment` objects to
+NumPy arrays or SciPy sparse matrices using **matrix-type-aware
+dispatch**, and zero-copy is used where possible depending on the matrix
+representation:
+
+- Sparse matrices stored as `dgCMatrix` / `dgRMatrix` are bridged to the
+  matching SciPy format by exposing the backing slot arrays via the C
+  buffer protocol (`flags.owndata = False`).
+- Dense matrices (`dgeMatrix`, base `matrix`) are converted to
+  Fortran-order NumPy arrays via a buffer-protocol path that avoids
+  copying where possible.
+- COO sparse arrays
+  ([`SparseArray::COO_SparseMatrix`](https://rdrr.io/pkg/SparseArray/man/COO_SparseArray-class.html))
+  are supported; value arrays are zero-copy, coordinate arrays require a
+  1→0 base conversion.
 
 The Python environment (numpy, scipy, anndata, mofaflex) is managed
 automatically by
@@ -51,7 +62,7 @@ BiocManager::install(c("SingleCellExperiment", "basilisk", "basilisk.utils",
                         "anndataR"))
 
 # Install MofaflexR from source (once on CRAN/Bioconductor, use that)
-# remotes::install_github("yourorg/MofaflexR")
+# remotes::install_github("MaximilianNuber/MofaflexR")
 ```
 
 ------------------------------------------------------------------------
@@ -71,7 +82,10 @@ sce <- SingleCellExperiment(assays = list(counts = counts))
 colnames(sce) <- paste0("cell", seq_len(ncol(sce)))
 rownames(sce) <- paste0("gene", seq_len(nrow(sce)))
 
-# ----- 2. Convert to ReticulateAnnData (zero-copy sparse bridge) -----
+# ----- 2. Convert to ReticulateAnnData (matrix-aware bridge) -----------
+# The dgCMatrix counts assay is identified as sparse and is bridged to
+# scipy.sparse.csc_matrix via zero-copy slot views (owndata = FALSE).
+# A dense assay would be converted to a NumPy ndarray instead.
 rada <- sce_to_reticulate_anndata(sce)
 print(rada)
 #> ReticulateAnnData object with n_obs × n_vars = 50 × 200
@@ -86,19 +100,32 @@ cat("Sparse:  ", reticulate::py_to_r(sp$issparse(py_adata$X)), "\n")
 cat("owndata: ", reticulate::py_to_r(py_adata$X$data$flags$owndata), "\n")
 # Shape:    50 x 200
 # Sparse:   TRUE
-# owndata:  FALSE   ← no copy of the data array
+# owndata:  FALSE   ← no copy of the underlying data arrays
 ```
 
-### Low-level usage: CSC matrix only
+### Low-level assay conversion
+
+The package dispatches by matrix class. For a `dgCMatrix` assay, the
+low-level helper
+[`sce_assay_to_scipy_csc()`](reference/sce_assay_to_scipy_csc.md)
+returns a `csc_matrix` in features × cells orientation (matching the R
+assay):
 
 ``` r
-# Returns a Python scipy.sparse.csc_matrix (shape = genes × cells)
+# Returns a scipy.sparse.csc_matrix (shape = genes × cells)
+# Other sparse classes (dgRMatrix, COO_SparseMatrix) are handled
+# by analogous internal converters.
 csc <- sce_assay_to_scipy_csc(sce, assay = "counts")
 
 shape_r <- reticulate::py_to_r(csc$shape)
 cat("Shape:", shape_r[[1]], "x", shape_r[[2]], "\n")  # 200 x 50
 cat("nnz:  ", reticulate::py_to_r(csc$nnz), "\n")
 ```
+
+For general dispatch across all supported matrix types, the package
+internally uses `se_assay_to_python_matrix()`. This function accepts any
+`SummarizedExperiment` subclass, extracts the named assay, and routes it
+to the appropriate NumPy / SciPy converter.
 
 ### Using the basilisk-managed environment
 
@@ -247,77 +274,80 @@ py_obj <- mdata$py_mudata()
 
 ------------------------------------------------------------------------
 
-## Zero-copy sparse bridge: how it works and what can force copies
+## Matrix-aware bridge: how zero-copy works and what can force copies
 
 ### How it works
 
-`dgCMatrix` stores its non-zero data in three contiguous C arrays:
+The package inspects the class of the assay matrix and routes it to the
+appropriate converter. The dispatch table is:
 
-| Slot | Content               | R type    | NumPy dtype |
-|------|-----------------------|-----------|-------------|
-| `@x` | non-zero values       | `double`  | `float64`   |
-| `@i` | row indices (0-based) | `integer` | `int32`     |
-| `@p` | column pointers       | `integer` | `int32`     |
+| R matrix class     | Python target             | Zero-copy for data arrays?                       |
+|--------------------|---------------------------|--------------------------------------------------|
+| `matrix`           | `numpy.ndarray`           | Yes (buffer protocol via `r_to_py`)              |
+| `dgeMatrix`        | `numpy.ndarray`           | Yes (`@x` slot + Fortran reshape)                |
+| `dgCMatrix`        | `scipy.sparse.csc_matrix` | Yes (`@x`, `@i`, `@p` slot views)                |
+| `dgRMatrix`        | `scipy.sparse.csr_matrix` | Yes (`@x`, `@j`, `@p` slot views)                |
+| `COO_SparseMatrix` | `scipy.sparse.coo_matrix` | Values yes; coordinates no (1→0 base conversion) |
+| Other              | `csc_matrix` or `ndarray` | No (one R-level copy during coercion)            |
 
-`reticulate::np_array(<R vector>, dtype = ...)` exposes the underlying R
-memory to NumPy via the **C buffer protocol** — no data allocation
-occurs (`numpy.ndarray.flags.owndata == False`).
+For the sparse paths,
+[`reticulate::np_array()`](https://rstudio.github.io/reticulate/reference/np_array.html)
+uses the C buffer protocol to expose R slot vector memory to NumPy
+without allocation (`numpy.ndarray.flags.owndata == False`). SciPy
+stores references to these arrays at construction time; it does not copy
+them.
 
-These three arrays are then passed directly to
-`scipy.sparse.csc_matrix((data, indices, indptr), shape=...)`.
-
-`scipy` itself does not copy the buffers at construction time; it wraps
-them by reference.
-
-The resulting `csc_matrix` (shape `genes × cells`) is then transposed
-via `.T` to obtain a `csr_matrix` (shape `cells × genes`) suitable for
-AnnData’s `obs × vars` layout. The `scipy` transpose is also
-**zero-copy**: it reuses the same C arrays, only changing strides and
-shape metadata.
+The resulting Python object has shape `(n_features, n_cells)` — matching
+the R assay. [`sce_to_anndata()`](reference/sce_to_anndata.md) then
+transposes it once via `.T` to obtain AnnData’s expected
+`obs × vars = cells × features` layout. For SciPy sparse matrices, `.T`
+is itself a zero-copy operation.
 
 ### What CAN force a copy
 
-| Trigger                                                                                                            | Why                                                    |
-|--------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------|
-| Coercion from a non-`dgCMatrix` assay                                                                              | `as(mat, "dgCMatrix")` may allocate a new object       |
-| `adata$X = some_dense_array`                                                                                       | AnnData will densify if you assign a dense numpy array |
-| Reading `adata$X` back to R via [`py_to_r()`](https://rstudio.github.io/reticulate/reference/r-py-conversion.html) | reticulate converts to a dense R matrix                |
-| `adata.X.toarray()` or `adata.X.todense()` in Python                                                               | Explicit densification                                 |
-| `.copy()` on any sparse matrix                                                                                     | Explicit copy                                          |
-| Operations that require sorted indices (e.g. `adata.X.sort_indices()`)                                             | Creates new arrays                                     |
+| Trigger                                              | Why                                                        |
+|------------------------------------------------------|------------------------------------------------------------|
+| Assay class has no direct converter (fallback)       | `as(mat, "dgCMatrix")` allocates a new R object            |
+| COO coordinates                                      | 1 → 0 base conversion requires new integer vectors         |
+| Dense `integer` matrix                               | `storage.mode(x) <- "double"` copies                       |
+| `obs` / `var` metadata → pandas `DataFrame`          | R columnar `data.frame` → Python row-oriented; unavoidable |
+| `py_to_r(adata$X)`                                   | reticulate converts to a dense R matrix                    |
+| `adata.X.toarray()` or `adata.X.todense()` in Python | Explicit densification                                     |
+| `.copy()` on any NumPy or SciPy object               | Explicit copy                                              |
+| Operations requiring sorted indices in SciPy         | May create new index arrays                                |
 
 ### Lifetime caveat
 
-The Python `csc_matrix` holds a **borrowed reference** to the R vectors
-`mat@x`, `mat@i`, and `mat@p`. You must ensure that:
+When zero-copy conversion is used, the Python object holds a **borrowed
+reference** to the R vectors backing the matrix slots. You must ensure
+that:
 
-1.  The `dgCMatrix` object (and therefore its slots) remains alive while
-    Python is using the matrix.
+1.  The source R matrix object (and therefore its slots) remains alive
+    while Python is using the converted object.
 2.  No R code modifies the vectors in-place (copy-on-modify semantics
-    usually prevent this for normal R code).
+    usually prevent this for normal R usage).
 3.  The R garbage collector has not freed the underlying memory.
 
-In practice, as long as the `MofaflexR` call site holds a reference to
-`sce` (or the extracted `dgCMatrix`) within the same R session, the
-memory is safe.
+In practice, as long as the call site holds a reference to `sce` (or the
+extracted matrix) within the same R session, the memory is safe.
 
 ------------------------------------------------------------------------
 
 ## API reference
 
-| Function                                                                              | Description                                                                                          |
-|---------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------|
-| `sce_assay_to_scipy_csc(x, assay)`                                                    | Extract assay → `scipy.sparse.csc_matrix` (genes × cells, zero-copy)                                 |
-| `sce_to_anndata(x, assay, obs, var, ...)`                                             | Full SCE → Python `anndata.AnnData` (cells × genes)                                                  |
-| `sce_to_reticulate_anndata(x, assay, ...)`                                            | SCE → [`anndataR::ReticulateAnnData`](https://anndataR.scverse.org/reference/ReticulateAnnData.html) |
-| `fit_mofaflex(data, data_options, model_options, training_options, mofa_compat, ...)` | Fit a MOFA-FLEX model; plain `AnnData` is auto-wrapped in `MuData`                                   |
-| `load_mofaflex_model(path, ...)`                                                      | Load a mofaflex HDF5 into MOFA2, patching HDF5 format differences                                    |
-| `with_mofaflex_env(expr)`                                                             | Evaluate `expr` inside the managed Python env                                                        |
-| `ReticulateMuData$new(x)`                                                             | Wrap Python `mudata.MuData` → `ReticulateMuData`                                                     |
-| `is_reticulate_mudata(x)`                                                             | Logical: is `x` a `ReticulateMuData`?                                                                |
-| `as_reticulate_mudata(x)`                                                             | Coerce Python MuData or existing wrapper                                                             |
-| `reticulate_mudata(py_obj)`                                                           | Constructor alias for `ReticulateMuData$new`                                                         |
-| [`py_mudata()`](reference/py_mudata.md)                                               | Import Python `mudata` module (`convert = FALSE`)                                                    |
+| Function                                                                              | Description                                                                                                                                                      |
+|---------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `sce_to_anndata(x, assay, obs, var, ...)`                                             | `SummarizedExperiment` / SCE → Python `anndata.AnnData`; dispatches by matrix class; transposed to cells × features                                              |
+| `sce_to_reticulate_anndata(x, assay, ...)`                                            | Wraps [`sce_to_anndata()`](reference/sce_to_anndata.md) result in [`anndataR::ReticulateAnnData`](https://anndataR.scverse.org/reference/ReticulateAnnData.html) |
+| `sce_assay_to_scipy_csc(x, assay)`                                                    | Low-level: extract `dgCMatrix` assay → `scipy.sparse.csc_matrix` (features × cells, zero-copy slots)                                                             |
+| `fit_mofaflex(data, data_options, model_options, training_options, mofa_compat, ...)` | Fit a MOFA-FLEX model; plain `AnnData` is auto-wrapped in `MuData`                                                                                               |
+| `load_mofaflex_model(path, ...)`                                                      | Load a mofaflex HDF5 into MOFA2, patching HDF5 format differences                                                                                                |
+| `with_mofaflex_env(expr)`                                                             | Evaluate `expr` inside the managed Python env                                                                                                                    |
+| `ReticulateMuData$new(x)`                                                             | Wrap Python `mudata.MuData` → `ReticulateMuData`                                                                                                                 |
+| `is_reticulate_mudata(x)`                                                             | Logical: is `x` a `ReticulateMuData`?                                                                                                                            |
+| `as_reticulate_mudata(x)`                                                             | Coerce Python MuData or existing wrapper                                                                                                                         |
+| `reticulate_mudata(py_obj)`                                                           | Constructor alias for `ReticulateMuData$new`                                                                                                                     |
+| [`py_mudata()`](reference/py_mudata.md)                                               | Import Python `mudata` module (`convert = FALSE`)                                                                                                                |
 
 ------------------------------------------------------------------------
 
@@ -386,5 +416,5 @@ reticulate::py_config()
 - [Kang IFN-β PBMC: MOFA-FLEX from R to MOFA2](kang-analysis.md):
 - [Bridging Single-Cell Multi-Omics: SCE and MAE to Python
   MuData](multimodal-mudata-bridge.md):
-- [Zero-copy sparse bridge: SingleCellExperiment → scipy.sparse →
-  AnnData](zero-copy-sparse-bridge.md):
+- [Matrix-aware R-to-Python bridge: SummarizedExperiment → NumPy / SciPy
+  → AnnData](zero-copy-sparse-bridge.md):

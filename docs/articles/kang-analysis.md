@@ -8,9 +8,12 @@ R:
 1.  **Load** the Kang et al. (2018) PBMC IFN-β stimulation dataset from
     `muscData`.
 2.  **Preprocess** with standard Bioconductor tools (scran / scuttle).
-3.  **Bridge** the resulting `SingleCellExperiment` into a Python
-    `AnnData` via
-    [`sce_to_reticulate_anndata()`](../reference/sce_to_reticulate_anndata.md).
+3.  **Bridge** the resulting `SingleCellExperiment` — a subclass of
+    `SummarizedExperiment` — into a Python `AnnData` via
+    [`sce_to_reticulate_anndata()`](../reference/sce_to_reticulate_anndata.md),
+    using matrix-type-aware dispatch that converts the assay matrix to a
+    NumPy array or a SciPy sparse matrix and applies zero-copy where
+    possible.
 4.  **Train** a MOFA-FLEX model with
     [`fit_mofaflex()`](../reference/fit_mofaflex.md), saving the model
     to an HDF5 file compatible with MOFA2.
@@ -116,9 +119,25 @@ cat(sprintf("Using %d HVGs from %d cells.\n", nrow(sce_hvg), ncol(sce_hvg)))
 ## Convert to AnnData
 
 [`sce_to_reticulate_anndata()`](../reference/sce_to_reticulate_anndata.md)
-builds a Python `AnnData` from the SCE without copying the underlying
-sparse matrix (zero-copy bridge). All `colData` columns are forwarded to
-`adata.obs`.
+bridges the selected assay from the `SingleCellExperiment` (a
+`SummarizedExperiment` subclass) to a Python `anndata.AnnData` object
+using matrix-type-aware conversion:
+
+- **Sparse matrices** (e.g. `dgCMatrix`) are converted to a matching
+  SciPy sparse format (`csc_matrix` for CSC, `csr_matrix` for CSR, etc.)
+  and zero-copy is used for the backing slot arrays where possible.
+- **Dense matrices** (e.g. `dgeMatrix`, base `matrix`) are converted to
+  NumPy arrays, with zero-copy attempted via the R-to-NumPy buffer
+  protocol.
+- All `colData` columns are forwarded to `adata.obs`; `rowData` goes to
+  `adata.var`.
+- The assay (originally features × cells) is transposed once to
+  AnnData’s expected `obs × vars = cells × features` layout.
+
+The `logcounts` assay produced by
+[`scuttle::logNormCounts()`](https://rdrr.io/pkg/scuttle/man/logNormCounts.html)
+is typically stored as a sparse matrix, so the returned `adata$X` will
+be a SciPy sparse matrix (CSR after transposition).
 
 ``` r
 adata <- sce_to_reticulate_anndata(
@@ -297,6 +316,9 @@ dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 model_path <- file.path(output_dir, "kang_mofaflex.hdf5")
 
 with_mofaflex_env({
+  # sce_to_reticulate_anndata uses matrix-type-aware dispatch:
+  # the logcounts assay (typically sparse) is converted to SciPy sparse;
+  # zero-copy is used for the backing data arrays where possible.
   adata <- MofaflexR::sce_to_reticulate_anndata(sce_hvg, assay = "logcounts")
   MofaflexR::fit_mofaflex(
     data = adata,
@@ -318,7 +340,7 @@ with_mofaflex_env({
 sessionInfo()
 #> R version 4.5.2 (2025-10-31)
 #> Platform: x86_64-pc-linux-gnu
-#> Running under: Ubuntu 24.04.3 LTS
+#> Running under: Ubuntu 24.04.4 LTS
 #> 
 #> Matrix products: default
 #> BLAS:   /usr/lib/x86_64-linux-gnu/openblas-pthread/libblas.so.3 

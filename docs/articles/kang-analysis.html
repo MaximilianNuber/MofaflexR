@@ -35,7 +35,7 @@
   <ul class="dropdown-menu" aria-labelledby="dropdown-articles">
 <li><a class="dropdown-item" href="../articles/kang-analysis.html">Kang IFN-β PBMC: MOFA-FLEX from R to MOFA2</a></li>
     <li><a class="dropdown-item" href="../articles/multimodal-mudata-bridge.html">Bridging Single-Cell Multi-Omics: SCE and MAE to Python MuData</a></li>
-    <li><a class="dropdown-item" href="../articles/zero-copy-sparse-bridge.html">Zero-copy sparse bridge: SingleCellExperiment → scipy.sparse → AnnData</a></li>
+    <li><a class="dropdown-item" href="../articles/zero-copy-sparse-bridge.html">Matrix-aware R-to-Python bridge: SummarizedExperiment → NumPy / SciPy → AnnData</a></li>
   </ul>
 </li>
 <li class="nav-item"><a class="nav-link" href="../news/index.html">Changelog</a></li>
@@ -61,7 +61,7 @@
                         <h4 data-toc-skip class="author">Maximilian
 Nuber</h4>
             
-            <h4 data-toc-skip class="date">2026-03-05</h4>
+            <h4 data-toc-skip class="date">2026-03-09</h4>
       
 
       <div class="d-none name"><code>kang-analysis.Rmd</code></div>
@@ -83,8 +83,11 @@ dataset from <code>muscData</code>.</li>
 / scuttle).</li>
 <li>
 <strong>Bridge</strong> the resulting
-<code>SingleCellExperiment</code> into a Python <code>AnnData</code> via
-<code><a href="../reference/sce_to_reticulate_anndata.html">sce_to_reticulate_anndata()</a></code>.</li>
+<code>SingleCellExperiment</code> — a subclass of
+<code>SummarizedExperiment</code> — into a Python <code>AnnData</code>
+via <code><a href="../reference/sce_to_reticulate_anndata.html">sce_to_reticulate_anndata()</a></code>, using matrix-type-aware
+dispatch that converts the assay matrix to a NumPy array or a SciPy
+sparse matrix and applies zero-copy where possible.</li>
 <li>
 <strong>Train</strong> a MOFA-FLEX model with
 <code><a href="../reference/fit_mofaflex.html">fit_mofaflex()</a></code>, saving the model to an HDF5 file compatible
@@ -187,10 +190,32 @@ donors, each split into a control and an IFN-β–stimulated condition (8 ×
 <div class="section level2">
 <h2 id="anndata">Convert to AnnData<a class="anchor" aria-label="anchor" href="#anndata"></a>
 </h2>
-<p><code><a href="../reference/sce_to_reticulate_anndata.html">sce_to_reticulate_anndata()</a></code> builds a Python
-<code>AnnData</code> from the SCE without copying the underlying sparse
-matrix (zero-copy bridge). All <code>colData</code> columns are
-forwarded to <code>adata.obs</code>.</p>
+<p><code><a href="../reference/sce_to_reticulate_anndata.html">sce_to_reticulate_anndata()</a></code> bridges the selected assay
+from the <code>SingleCellExperiment</code> (a
+<code>SummarizedExperiment</code> subclass) to a Python
+<code>anndata.AnnData</code> object using matrix-type-aware
+conversion:</p>
+<ul>
+<li>
+<strong>Sparse matrices</strong> (e.g. <code>dgCMatrix</code>) are
+converted to a matching SciPy sparse format (<code>csc_matrix</code> for
+CSC, <code>csr_matrix</code> for CSR, etc.) and zero-copy is used for
+the backing slot arrays where possible.</li>
+<li>
+<strong>Dense matrices</strong> (e.g. <code>dgeMatrix</code>, base
+<code>matrix</code>) are converted to NumPy arrays, with zero-copy
+attempted via the R-to-NumPy buffer protocol.</li>
+<li>All <code>colData</code> columns are forwarded to
+<code>adata.obs</code>; <code>rowData</code> goes to
+<code>adata.var</code>.</li>
+<li>The assay (originally features × cells) is transposed once to
+AnnData’s expected <code>obs × vars = cells × features</code>
+layout.</li>
+</ul>
+<p>The <code>logcounts</code> assay produced by
+<code><a href="https://rdrr.io/pkg/scuttle/man/logNormCounts.html" class="external-link">scuttle::logNormCounts()</a></code> is typically stored as a sparse
+matrix, so the returned <code>adata$X</code> will be a SciPy sparse
+matrix (CSR after transposition).</p>
 <div class="sourceCode" id="cb7"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="va">adata</span> <span class="op">&lt;-</span> <span class="fu"><a href="../reference/sce_to_reticulate_anndata.html">sce_to_reticulate_anndata</a></span><span class="op">(</span></span>
 <span>    <span class="va">sce_hvg</span>,</span>
@@ -367,6 +392,9 @@ the current R session.</p>
 <span><span class="va">model_path</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/r/base/file.path.html" class="external-link">file.path</a></span><span class="op">(</span><span class="va">output_dir</span>, <span class="st">"kang_mofaflex.hdf5"</span><span class="op">)</span></span>
 <span></span>
 <span><span class="fu"><a href="../reference/with_mofaflex_env.html">with_mofaflex_env</a></span><span class="op">(</span><span class="op">{</span></span>
+<span>  <span class="co"># sce_to_reticulate_anndata uses matrix-type-aware dispatch:</span></span>
+<span>  <span class="co"># the logcounts assay (typically sparse) is converted to SciPy sparse;</span></span>
+<span>  <span class="co"># zero-copy is used for the backing data arrays where possible.</span></span>
 <span>  <span class="va">adata</span> <span class="op">&lt;-</span> <span class="fu">MofaflexR</span><span class="fu">::</span><span class="fu"><a href="../reference/sce_to_reticulate_anndata.html">sce_to_reticulate_anndata</a></span><span class="op">(</span><span class="va">sce_hvg</span>, assay <span class="op">=</span> <span class="st">"logcounts"</span><span class="op">)</span></span>
 <span>  <span class="fu">MofaflexR</span><span class="fu">::</span><span class="fu"><a href="../reference/fit_mofaflex.html">fit_mofaflex</a></span><span class="op">(</span></span>
 <span>    data <span class="op">=</span> <span class="va">adata</span>,</span>
@@ -388,7 +416,7 @@ the current R session.</p>
 <code class="sourceCode R"><span><span class="fu"><a href="https://rdrr.io/r/utils/sessionInfo.html" class="external-link">sessionInfo</a></span><span class="op">(</span><span class="op">)</span></span>
 <span><span class="co">#&gt; R version 4.5.2 (2025-10-31)</span></span>
 <span><span class="co">#&gt; Platform: x86_64-pc-linux-gnu</span></span>
-<span><span class="co">#&gt; Running under: Ubuntu 24.04.3 LTS</span></span>
+<span><span class="co">#&gt; Running under: Ubuntu 24.04.4 LTS</span></span>
 <span><span class="co">#&gt; </span></span>
 <span><span class="co">#&gt; Matrix products: default</span></span>
 <span><span class="co">#&gt; BLAS:   /usr/lib/x86_64-linux-gnu/openblas-pthread/libblas.so.3 </span></span>

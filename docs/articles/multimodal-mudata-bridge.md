@@ -2,9 +2,11 @@
 
 ## Introduction
 
-**MofaflexR** provides zero-copy bridges between Bioconductor
-single-cell objects and the Python `mudata` / `anndata` ecosystem. This
-vignette demonstrates:
+**MofaflexR** provides matrix-aware bridges between Bioconductor
+single-cell objects and the Python `mudata` / `anndata` ecosystem.
+Common dense and sparse assay matrix types are converted to NumPy arrays
+or SciPy sparse matrices, as appropriate, and zero-copy is used where
+possible for supported representations. This vignette demonstrates:
 
 1.  **[`sce_to_reticulate_mudata()`](../reference/sce_to_reticulate_mudata.md)**:
     Convert a `SingleCellExperiment` – with alternative experiments
@@ -19,9 +21,14 @@ vignette demonstrates:
 3.  **`ReticulateMuData` active bindings and methods**: Access Python
     MuData fields directly from R without any data copies.
 
-All matrix transfers are **zero-copy**: R `dgCMatrix` objects are shared
-with Python through `scipy.sparse.csc_matrix` pointers. No Python ↔︎ R
-serialisation takes place unless you explicitly call
+Matrix transfers use the same dispatch machinery as
+[`sce_to_anndata()`](../reference/sce_to_anndata.md): each modality’s
+assay is routed to the appropriate converter based on its class
+(`dgCMatrix` → `csc_matrix`, `dgRMatrix` → `csr_matrix`, `dgeMatrix` /
+base `matrix` → `ndarray`, `COO_SparseMatrix` → `coo_matrix`). For the
+sparse formats used in typical single-cell count matrices, zero-copy is
+used for the backing slot arrays. No Python ↔︎ R serialisation takes
+place unless you explicitly call
 [`reticulate::py_to_r()`](https://rstudio.github.io/reticulate/reference/r-py-conversion.html).
 
 ### Prerequisites
@@ -49,8 +56,11 @@ suppressPackageStartupMessages({
 ## Synthetic CITE-seq Dataset
 
 We construct a minimal **CITE-seq** dataset that faithfully mimics real
-single-cell data: 300 cells, 1 000 genes (RNA), and 40 surface proteins
-(ADT).
+single-cell data: 300 cells, 1 000 genes (RNA), and 40 surface proteins
+(ADT). Both RNA and ADT are represented as sparse `dgCMatrix` objects,
+which is typical for single-cell count data. The same conversion
+machinery also handles dense assay matrices (e.g. `dgeMatrix`, base
+`matrix`).
 
 ``` r
 set.seed(42)
@@ -145,8 +155,13 @@ cat("ADT dimensions       : ", dim(altExp(sce, "adt")), "\n")
 
 [`sce_to_reticulate_mudata()`](../reference/sce_to_reticulate_mudata.md)
 maps the main SCE to one modality and each `altExp` to its own modality.
-The conversion is **zero-copy**: all sparse matrices remain in their
-original R memory locations.
+Each modality’s assay is converted independently using the same
+matrix-aware dispatch as
+[`sce_to_anndata()`](../reference/sce_to_anndata.md): for sparse count
+matrices stored in a supported format (e.g. `dgCMatrix`), zero-copy is
+used for the underlying data arrays; dense matrices are converted to
+NumPy arrays via the buffer protocol. The resulting Python objects share
+memory with R for the duration of the session.
 
 ``` r
 mdata <- sce_to_reticulate_mudata(
@@ -431,64 +446,79 @@ cat("ADT modality: ", adt_from_mae$n_obs(), "obs x", adt_from_mae$n_vars(), "var
 
 ------------------------------------------------------------------------
 
-## Real Dataset Examples (Optional)
+## Real Dataset Examples
 
-The demonstrations above use synthetic data so the vignette renders
-offline and instantly. For a real CITE-seq workflow, replace the
-synthetic setup with any SCE that has an ADT altExp. Below is a sketch
-using the `scRNAseq` package:
+The sections above use synthetic data so the vignette can be rendered
+offline. The following examples run the same bridge on real datasets.
+
+### SCE with altExps: Buettner et al. ESC data
+
+[`BuettnerESCData()`](https://rdrr.io/pkg/scRNAseq/man/BuettnerESCData.html)
+from the `scRNAseq` package provides 288 mouse embryonic stem cells with
+ERCC spike-in counts stored in an `altExp`. This is a compact real
+dataset that exercises the multi-modality path.
 
 ``` r
-# ---- Using a real scRNAseq dataset ----------------------------------------
-# Many scRNAseq datasets include altExps for spike-ins or protein panels.
-# Example: Zilionis et al. mouse lung data (has ercc altExp)
-#
-# library(scRNAseq)
-# sce_lung <- ZilionisLungData("mouse")
-# altExpNames(sce_lung)   # check for altExps
-#
-# # Convert to MuData (use first assay of each altExp automatically)
-# mdata_lung <- sce_to_reticulate_mudata(
-#   x             = sce_lung,
-#   main_modality = "rna",
-#   assay         = "counts"
-# )
-# mdata_lung
+library(scRNAseq)
+
+sce_buettner <- BuettnerESCData()
+altExpNames(sce_buettner)   # "ERCC"
+#> [1] "ERCC"
+
+mdata_buettner <- sce_to_reticulate_mudata(
+  x             = sce_buettner,
+  main_modality = "rna",
+  assay         = "counts"
+)
+mdata_buettner$modality_names()   # "rna" and "ERCC"
+#> [1] "rna"  "ERCC"
+mdata_buettner$shape
+#> [1]   288 38385
 ```
 
-For a `MultiAssayExperiment` from a real experiment:
+### MultiAssayExperiment: ACC data
+
+`miniACC` ships with the `MultiAssayExperiment` package and contains
+five assays from an adrenocortical carcinoma study. `Mutations` (plain
+`matrix`) is skipped because it is not a `SummarizedExperiment`;
+`gistict` is skipped because its assay is unnamed. The remaining three
+SE assays are converted normally.
 
 ``` r
-# ---- Using a MultiAssayExperiment from curatedTCGAData --------------------
-# library(curatedTCGAData)
-# mae_brca <- curatedTCGAData("BRCA",
-#                             assays = c("RNASeq2GeneNorm", "miRNASeqGene"),
-#                             dry.run = FALSE)
-#
-# mdata_brca <- mae_to_reticulate_mudata(mae_brca)
-# mdata_brca$modality_names()
+data(miniACC)
+names(experiments(miniACC))
+#> [1] "RNASeq2GeneNorm" "gistict"         "RPPAArray"       "Mutations"      
+#> [5] "miRNASeqGene"
+
+mdata_acc <- mae_to_reticulate_mudata(miniACC)
+mdata_acc$modality_names()
+#> [1] "RNASeq2GeneNorm" "RPPAArray"       "miRNASeqGene"
+mdata_acc$n_obs()
+#> [1] 205
 ```
 
 ------------------------------------------------------------------------
 
 ## Interoperability Round-trip
 
-The `ReticulateMuData` object can be passed directly to any Python
-function that accepts a `MuData` via its `.py_mudata()` raw accessor:
+A `ReticulateMuData` wraps a live Python `MuData` object. The raw Python
+object is accessible via `$py_mudata()` and can be passed to any Python
+code in the mudata ecosystem. Here we write `mdata` (the synthetic
+CITE-seq object from earlier) to HDF5 and read it back.
 
 ``` r
-# ---- Pass directly to Python code -----------------------------------------
 mu <- reticulate::import("mudata", convert = FALSE)
 
-# Write to h5mu
-mu$write_h5mu(mdata$py_mudata(), "/tmp/my_mdata.h5mu")
+h5mu_path <- tempfile(fileext = ".h5mu")
+invisible(mu$write_h5mu(h5mu_path, mdata$py_mudata()))
 
-# Read back – returns a Python MuData
-py_loaded  <- mu$read_h5mu("/tmp/my_mdata.h5mu")
+py_loaded  <- mu$read_h5mu(h5mu_path)
 mdata_back <- ReticulateMuData$new(py_loaded)
 
-mdata_back$obs_names
+head(mdata_back$obs_names, 4)
+#> [1] "cell_1" "cell_2" "cell_3" "cell_4"
 mdata_back$shape
+#> [1]  300 1040
 ```
 
 ------------------------------------------------------------------------
@@ -499,7 +529,7 @@ mdata_back$shape
 sessionInfo()
 #> R version 4.5.2 (2025-10-31)
 #> Platform: x86_64-pc-linux-gnu
-#> Running under: Ubuntu 24.04.3 LTS
+#> Running under: Ubuntu 24.04.4 LTS
 #> 
 #> Matrix products: default
 #> BLAS:   /usr/lib/x86_64-linux-gnu/openblas-pthread/libblas.so.3 
@@ -521,29 +551,49 @@ sessionInfo()
 #> [8] base     
 #> 
 #> other attached packages:
-#>  [1] MultiAssayExperiment_1.36.1 Matrix_1.7-4               
-#>  [3] SingleCellExperiment_1.32.0 SummarizedExperiment_1.40.0
-#>  [5] Biobase_2.70.0              GenomicRanges_1.62.1       
-#>  [7] Seqinfo_1.0.0               IRanges_2.44.0             
-#>  [9] S4Vectors_0.48.0            BiocGenerics_0.56.0        
-#> [11] generics_0.1.4              MatrixGenerics_1.22.0      
-#> [13] matrixStats_1.5.0           MofaflexR_0.0.1            
-#> [15] BiocStyle_2.38.0           
+#>  [1] ensembldb_2.34.0            AnnotationFilter_1.34.0    
+#>  [3] GenomicFeatures_1.62.0      AnnotationDbi_1.72.0       
+#>  [5] scRNAseq_2.24.0             MultiAssayExperiment_1.36.1
+#>  [7] Matrix_1.7-4                SingleCellExperiment_1.32.0
+#>  [9] SummarizedExperiment_1.40.0 Biobase_2.70.0             
+#> [11] GenomicRanges_1.62.1        Seqinfo_1.0.0              
+#> [13] IRanges_2.44.0              S4Vectors_0.48.0           
+#> [15] BiocGenerics_0.56.0         generics_0.1.4             
+#> [17] MatrixGenerics_1.22.0       matrixStats_1.5.0          
+#> [19] MofaflexR_0.0.1             BiocStyle_2.38.0           
 #> 
 #> loaded via a namespace (and not attached):
-#>  [1] sass_0.4.10          SparseArray_1.10.8   lattice_0.22-7      
-#>  [4] magrittr_2.0.4       digest_0.6.39        evaluate_1.0.5      
-#>  [7] grid_4.5.2           bookdown_0.46        fastmap_1.2.0       
-#> [10] jsonlite_2.0.0       BiocManager_1.30.27  purrr_1.2.1         
-#> [13] anndataR_1.0.2       textshaping_1.0.4    jquerylib_0.1.4     
-#> [16] abind_1.4-8          cli_3.6.5            rlang_1.1.7         
-#> [19] XVector_0.50.0       withr_3.0.2          cachem_1.1.0        
-#> [22] DelayedArray_0.36.0  yaml_2.3.12          BiocBaseUtils_1.12.0
-#> [25] otel_0.2.0           S4Arrays_1.10.1      tools_4.5.2         
-#> [28] reticulate_1.45.0    vctrs_0.7.1          R6_2.6.1            
-#> [31] png_0.1-8            lifecycle_1.0.5      fs_1.6.6            
-#> [34] htmlwidgets_1.6.4    ragg_1.5.0           desc_1.4.3          
-#> [37] pkgdown_2.2.0        bslib_0.10.0         Rcpp_1.1.1          
-#> [40] systemfonts_1.3.1    xfun_0.56            knitr_1.51          
-#> [43] htmltools_0.5.9      rmarkdown_2.30       compiler_4.5.2
+#>  [1] DBI_1.3.0                bitops_1.0-9             httr2_1.2.2             
+#>  [4] anndataR_1.0.2           rlang_1.1.7              magrittr_2.0.4          
+#>  [7] otel_0.2.0               gypsum_1.6.0             compiler_4.5.2          
+#> [10] RSQLite_2.4.6            png_0.1-8                systemfonts_1.3.1       
+#> [13] vctrs_0.7.1              ProtGenerics_1.42.0      pkgconfig_2.0.3         
+#> [16] crayon_1.5.3             fastmap_1.2.0            dbplyr_2.5.2            
+#> [19] XVector_0.50.0           Rsamtools_2.26.0         rmarkdown_2.30          
+#> [22] UCSC.utils_1.6.1         ragg_1.5.0               purrr_1.2.1             
+#> [25] bit_4.6.0                xfun_0.56                cachem_1.1.0            
+#> [28] cigarillo_1.0.0          GenomeInfoDb_1.46.2      jsonlite_2.0.0          
+#> [31] blob_1.3.0               rhdf5filters_1.22.0      DelayedArray_0.36.0     
+#> [34] Rhdf5lib_1.32.0          BiocParallel_1.44.0      parallel_4.5.2          
+#> [37] R6_2.6.1                 bslib_0.10.0             reticulate_1.45.0       
+#> [40] rtracklayer_1.70.1       jquerylib_0.1.4          Rcpp_1.1.1              
+#> [43] bookdown_0.46            knitr_1.51               BiocBaseUtils_1.12.0    
+#> [46] tidyselect_1.2.1         abind_1.4-8              yaml_2.3.12             
+#> [49] codetools_0.2-20         curl_7.0.0               alabaster.sce_1.10.0    
+#> [52] lattice_0.22-7           tibble_3.3.1             withr_3.0.2             
+#> [55] KEGGREST_1.50.0          evaluate_1.0.5           desc_1.4.3              
+#> [58] BiocFileCache_3.0.0      alabaster.schemas_1.10.0 ExperimentHub_3.0.0     
+#> [61] Biostrings_2.78.0        pillar_1.11.1            BiocManager_1.30.27     
+#> [64] filelock_1.0.3           RCurl_1.98-1.17          BiocVersion_3.22.0      
+#> [67] alabaster.base_1.10.0    alabaster.ranges_1.10.0  glue_1.8.0              
+#> [70] lazyeval_0.2.2           alabaster.matrix_1.10.0  tools_4.5.2             
+#> [73] AnnotationHub_4.0.0      BiocIO_1.20.0            GenomicAlignments_1.46.0
+#> [76] fs_1.6.6                 XML_3.99-0.22            rhdf5_2.54.1            
+#> [79] grid_4.5.2               HDF5Array_1.38.0         restfulr_0.0.16         
+#> [82] cli_3.6.5                rappdirs_0.3.4           textshaping_1.0.4       
+#> [85] S4Arrays_1.10.1          dplyr_1.2.0              alabaster.se_1.10.0     
+#> [88] sass_0.4.10              digest_0.6.39            SparseArray_1.10.8      
+#> [91] rjson_0.2.23             htmlwidgets_1.6.4        memoise_2.0.1           
+#> [94] htmltools_0.5.9          pkgdown_2.2.0            lifecycle_1.0.5         
+#> [97] h5mread_1.2.1            httr_1.4.8               bit64_4.6.0-1
 ```

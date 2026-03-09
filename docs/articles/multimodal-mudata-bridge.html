@@ -35,7 +35,7 @@
   <ul class="dropdown-menu" aria-labelledby="dropdown-articles">
 <li><a class="dropdown-item" href="../articles/kang-analysis.html">Kang IFN-β PBMC: MOFA-FLEX from R to MOFA2</a></li>
     <li><a class="dropdown-item" href="../articles/multimodal-mudata-bridge.html">Bridging Single-Cell Multi-Omics: SCE and MAE to Python MuData</a></li>
-    <li><a class="dropdown-item" href="../articles/zero-copy-sparse-bridge.html">Zero-copy sparse bridge: SingleCellExperiment → scipy.sparse → AnnData</a></li>
+    <li><a class="dropdown-item" href="../articles/zero-copy-sparse-bridge.html">Matrix-aware R-to-Python bridge: SummarizedExperiment → NumPy / SciPy → AnnData</a></li>
   </ul>
 </li>
 <li class="nav-item"><a class="nav-link" href="../news/index.html">Changelog</a></li>
@@ -61,7 +61,7 @@
                         <h4 data-toc-skip class="author">Maximilian
 Nuber</h4>
             
-            <h4 data-toc-skip class="date">2026-03-05</h4>
+            <h4 data-toc-skip class="date">2026-03-09</h4>
       
 
       <div class="d-none name"><code>multimodal-mudata-bridge.Rmd</code></div>
@@ -72,9 +72,12 @@ Nuber</h4>
 <div class="section level2">
 <h2 id="introduction">Introduction<a class="anchor" aria-label="anchor" href="#introduction"></a>
 </h2>
-<p><strong>MofaflexR</strong> provides zero-copy bridges between
+<p><strong>MofaflexR</strong> provides matrix-aware bridges between
 Bioconductor single-cell objects and the Python <code>mudata</code> /
-<code>anndata</code> ecosystem. This vignette demonstrates:</p>
+<code>anndata</code> ecosystem. Common dense and sparse assay matrix
+types are converted to NumPy arrays or SciPy sparse matrices, as
+appropriate, and zero-copy is used where possible for supported
+representations. This vignette demonstrates:</p>
 <ol style="list-style-type: decimal">
 <li><p><strong><code><a href="../reference/sce_to_reticulate_mudata.html">sce_to_reticulate_mudata()</a></code></strong>: Convert
 a <code>SingleCellExperiment</code> – with alternative experiments
@@ -88,11 +91,16 @@ a <code>MultiAssayExperiment</code> with multiple experiments into a
 methods</strong>: Access Python MuData fields directly from R without
 any data copies.</p></li>
 </ol>
-<p>All matrix transfers are <strong>zero-copy</strong>: R
-<code>dgCMatrix</code> objects are shared with Python through
-<code>scipy.sparse.csc_matrix</code> pointers. No Python ↔︎ R
-serialisation takes place unless you explicitly call
-<code><a href="https://rstudio.github.io/reticulate/reference/r-py-conversion.html" class="external-link">reticulate::py_to_r()</a></code>.</p>
+<p>Matrix transfers use the same dispatch machinery as
+<code><a href="../reference/sce_to_anndata.html">sce_to_anndata()</a></code>: each modality’s assay is routed to the
+appropriate converter based on its class (<code>dgCMatrix</code> →
+<code>csc_matrix</code>, <code>dgRMatrix</code> →
+<code>csr_matrix</code>, <code>dgeMatrix</code> / base
+<code>matrix</code> → <code>ndarray</code>,
+<code>COO_SparseMatrix</code> → <code>coo_matrix</code>). For the sparse
+formats used in typical single-cell count matrices, zero-copy is used
+for the backing slot arrays. No Python ↔︎ R serialisation takes place
+unless you explicitly call <code><a href="https://rstudio.github.io/reticulate/reference/r-py-conversion.html" class="external-link">reticulate::py_to_r()</a></code>.</p>
 <div class="section level3">
 <h3 id="prerequisites">Prerequisites<a class="anchor" aria-label="anchor" href="#prerequisites"></a>
 </h3>
@@ -117,8 +125,11 @@ serialisation takes place unless you explicitly call
 <h2 id="synthetic-cite-seq-dataset">Synthetic CITE-seq Dataset<a class="anchor" aria-label="anchor" href="#synthetic-cite-seq-dataset"></a>
 </h2>
 <p>We construct a minimal <strong>CITE-seq</strong> dataset that
-faithfully mimics real single-cell data: 300 cells, 1 000 genes (RNA),
-and 40 surface proteins (ADT).</p>
+faithfully mimics real single-cell data: 300 cells, 1 000 genes (RNA),
+and 40 surface proteins (ADT). Both RNA and ADT are represented as
+sparse <code>dgCMatrix</code> objects, which is typical for single-cell
+count data. The same conversion machinery also handles dense assay
+matrices (e.g. <code>dgeMatrix</code>, base <code>matrix</code>).</p>
 <div class="sourceCode" id="cb3"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="fu"><a href="https://rdrr.io/r/base/Random.html" class="external-link">set.seed</a></span><span class="op">(</span><span class="fl">42</span><span class="op">)</span></span>
 <span></span>
@@ -209,9 +220,13 @@ and 40 surface proteins (ADT).</p>
 <h3 id="convert-with-sce_to_reticulate_mudata">Convert with <code>sce_to_reticulate_mudata()</code><a class="anchor" aria-label="anchor" href="#convert-with-sce_to_reticulate_mudata"></a>
 </h3>
 <p><code><a href="../reference/sce_to_reticulate_mudata.html">sce_to_reticulate_mudata()</a></code> maps the main SCE to one
-modality and each <code>altExp</code> to its own modality. The
-conversion is <strong>zero-copy</strong>: all sparse matrices remain in
-their original R memory locations.</p>
+modality and each <code>altExp</code> to its own modality. Each
+modality’s assay is converted independently using the same matrix-aware
+dispatch as <code><a href="../reference/sce_to_anndata.html">sce_to_anndata()</a></code>: for sparse count matrices
+stored in a supported format (e.g. <code>dgCMatrix</code>), zero-copy is
+used for the underlying data arrays; dense matrices are converted to
+NumPy arrays via the buffer protocol. The resulting Python objects share
+memory with R for the duration of the session.</p>
 <div class="sourceCode" id="cb5"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="va">mdata</span> <span class="op">&lt;-</span> <span class="fu"><a href="../reference/sce_to_reticulate_mudata.html">sce_to_reticulate_mudata</a></span><span class="op">(</span></span>
 <span>  x             <span class="op">=</span> <span class="va">sce</span>,</span>
@@ -494,59 +509,79 @@ auto-wrapping<a class="anchor" aria-label="anchor" href="#py_call-generic-python
 </div>
 </div>
 <div class="section level2">
-<h2 id="real-dataset-examples-optional">Real Dataset Examples (Optional)<a class="anchor" aria-label="anchor" href="#real-dataset-examples-optional"></a>
+<h2 id="real-dataset-examples">Real Dataset Examples<a class="anchor" aria-label="anchor" href="#real-dataset-examples"></a>
 </h2>
-<p>The demonstrations above use synthetic data so the vignette renders
-offline and instantly. For a real CITE-seq workflow, replace the
-synthetic setup with any SCE that has an ADT altExp. Below is a sketch
-using the <code>scRNAseq</code> package:</p>
+<p>The sections above use synthetic data so the vignette can be rendered
+offline. The following examples run the same bridge on real
+datasets.</p>
+<div class="section level3">
+<h3 id="sce-with-altexps-buettner-et-al--esc-data">SCE with altExps: Buettner et al. ESC data<a class="anchor" aria-label="anchor" href="#sce-with-altexps-buettner-et-al--esc-data"></a>
+</h3>
+<p><code><a href="https://rdrr.io/pkg/scRNAseq/man/BuettnerESCData.html" class="external-link">BuettnerESCData()</a></code> from the <code>scRNAseq</code> package
+provides 288 mouse embryonic stem cells with ERCC spike-in counts stored
+in an <code>altExp</code>. This is a compact real dataset that exercises
+the multi-modality path.</p>
 <div class="sourceCode" id="cb22"><pre class="downlit sourceCode r">
-<code class="sourceCode R"><span><span class="co"># ---- Using a real scRNAseq dataset ----------------------------------------</span></span>
-<span><span class="co"># Many scRNAseq datasets include altExps for spike-ins or protein panels.</span></span>
-<span><span class="co"># Example: Zilionis et al. mouse lung data (has ercc altExp)</span></span>
-<span><span class="co">#</span></span>
-<span><span class="co"># library(scRNAseq)</span></span>
-<span><span class="co"># sce_lung &lt;- ZilionisLungData("mouse")</span></span>
-<span><span class="co"># altExpNames(sce_lung)   # check for altExps</span></span>
-<span><span class="co">#</span></span>
-<span><span class="co"># # Convert to MuData (use first assay of each altExp automatically)</span></span>
-<span><span class="co"># mdata_lung &lt;- sce_to_reticulate_mudata(</span></span>
-<span><span class="co">#   x             = sce_lung,</span></span>
-<span><span class="co">#   main_modality = "rna",</span></span>
-<span><span class="co">#   assay         = "counts"</span></span>
-<span><span class="co"># )</span></span>
-<span><span class="co"># mdata_lung</span></span></code></pre></div>
-<p>For a <code>MultiAssayExperiment</code> from a real experiment:</p>
+<code class="sourceCode R"><span><span class="kw"><a href="https://rdrr.io/r/base/library.html" class="external-link">library</a></span><span class="op">(</span><span class="va">scRNAseq</span><span class="op">)</span></span>
+<span></span>
+<span><span class="va">sce_buettner</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/pkg/scRNAseq/man/BuettnerESCData.html" class="external-link">BuettnerESCData</a></span><span class="op">(</span><span class="op">)</span></span>
+<span><span class="fu"><a href="https://rdrr.io/pkg/SingleCellExperiment/man/altExps.html" class="external-link">altExpNames</a></span><span class="op">(</span><span class="va">sce_buettner</span><span class="op">)</span>   <span class="co"># "ERCC"</span></span>
+<span><span class="co">#&gt; [1] "ERCC"</span></span>
+<span></span>
+<span><span class="va">mdata_buettner</span> <span class="op">&lt;-</span> <span class="fu"><a href="../reference/sce_to_reticulate_mudata.html">sce_to_reticulate_mudata</a></span><span class="op">(</span></span>
+<span>  x             <span class="op">=</span> <span class="va">sce_buettner</span>,</span>
+<span>  main_modality <span class="op">=</span> <span class="st">"rna"</span>,</span>
+<span>  assay         <span class="op">=</span> <span class="st">"counts"</span></span>
+<span><span class="op">)</span></span>
+<span><span class="va">mdata_buettner</span><span class="op">$</span><span class="fu">modality_names</span><span class="op">(</span><span class="op">)</span>   <span class="co"># "rna" and "ERCC"</span></span>
+<span><span class="co">#&gt; [1] "rna"  "ERCC"</span></span>
+<span><span class="va">mdata_buettner</span><span class="op">$</span><span class="va">shape</span></span>
+<span><span class="co">#&gt; [1]   288 38385</span></span></code></pre></div>
+</div>
+<div class="section level3">
+<h3 id="multiassayexperiment-acc-data">MultiAssayExperiment: ACC data<a class="anchor" aria-label="anchor" href="#multiassayexperiment-acc-data"></a>
+</h3>
+<p><code>miniACC</code> ships with the <code>MultiAssayExperiment</code>
+package and contains five assays from an adrenocortical carcinoma study.
+<code>Mutations</code> (plain <code>matrix</code>) is skipped because it
+is not a <code>SummarizedExperiment</code>; <code>gistict</code> is
+skipped because its assay is unnamed. The remaining three SE assays are
+converted normally.</p>
 <div class="sourceCode" id="cb23"><pre class="downlit sourceCode r">
-<code class="sourceCode R"><span><span class="co"># ---- Using a MultiAssayExperiment from curatedTCGAData --------------------</span></span>
-<span><span class="co"># library(curatedTCGAData)</span></span>
-<span><span class="co"># mae_brca &lt;- curatedTCGAData("BRCA",</span></span>
-<span><span class="co">#                             assays = c("RNASeq2GeneNorm", "miRNASeqGene"),</span></span>
-<span><span class="co">#                             dry.run = FALSE)</span></span>
-<span><span class="co">#</span></span>
-<span><span class="co"># mdata_brca &lt;- mae_to_reticulate_mudata(mae_brca)</span></span>
-<span><span class="co"># mdata_brca$modality_names()</span></span></code></pre></div>
+<code class="sourceCode R"><span><span class="fu"><a href="https://rdrr.io/r/utils/data.html" class="external-link">data</a></span><span class="op">(</span><span class="va">miniACC</span><span class="op">)</span></span>
+<span><span class="fu"><a href="https://rdrr.io/r/base/names.html" class="external-link">names</a></span><span class="op">(</span><span class="fu"><a href="https://github.com/waldronlab/MultiAssayExperiment/reference/MultiAssayExperiment-methods.html" class="external-link">experiments</a></span><span class="op">(</span><span class="va">miniACC</span><span class="op">)</span><span class="op">)</span></span>
+<span><span class="co">#&gt; [1] "RNASeq2GeneNorm" "gistict"         "RPPAArray"       "Mutations"      </span></span>
+<span><span class="co">#&gt; [5] "miRNASeqGene"</span></span>
+<span></span>
+<span><span class="va">mdata_acc</span> <span class="op">&lt;-</span> <span class="fu"><a href="../reference/mae_to_reticulate_mudata.html">mae_to_reticulate_mudata</a></span><span class="op">(</span><span class="va">miniACC</span><span class="op">)</span></span>
+<span><span class="va">mdata_acc</span><span class="op">$</span><span class="fu">modality_names</span><span class="op">(</span><span class="op">)</span></span>
+<span><span class="co">#&gt; [1] "RNASeq2GeneNorm" "RPPAArray"       "miRNASeqGene"</span></span>
+<span><span class="va">mdata_acc</span><span class="op">$</span><span class="fu">n_obs</span><span class="op">(</span><span class="op">)</span></span>
+<span><span class="co">#&gt; [1] 205</span></span></code></pre></div>
 <hr>
+</div>
 </div>
 <div class="section level2">
 <h2 id="interoperability-round-trip">Interoperability Round-trip<a class="anchor" aria-label="anchor" href="#interoperability-round-trip"></a>
 </h2>
-<p>The <code>ReticulateMuData</code> object can be passed directly to
-any Python function that accepts a <code>MuData</code> via its
-<code>.py_mudata()</code> raw accessor:</p>
+<p>A <code>ReticulateMuData</code> wraps a live Python
+<code>MuData</code> object. The raw Python object is accessible via
+<code>$py_mudata()</code> and can be passed to any Python code in the
+mudata ecosystem. Here we write <code>mdata</code> (the synthetic
+CITE-seq object from earlier) to HDF5 and read it back.</p>
 <div class="sourceCode" id="cb24"><pre class="downlit sourceCode r">
-<code class="sourceCode R"><span><span class="co"># ---- Pass directly to Python code -----------------------------------------</span></span>
-<span><span class="va">mu</span> <span class="op">&lt;-</span> <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/import.html" class="external-link">import</a></span><span class="op">(</span><span class="st">"mudata"</span>, convert <span class="op">=</span> <span class="cn">FALSE</span><span class="op">)</span></span>
+<code class="sourceCode R"><span><span class="va">mu</span> <span class="op">&lt;-</span> <span class="fu">reticulate</span><span class="fu">::</span><span class="fu"><a href="https://rstudio.github.io/reticulate/reference/import.html" class="external-link">import</a></span><span class="op">(</span><span class="st">"mudata"</span>, convert <span class="op">=</span> <span class="cn">FALSE</span><span class="op">)</span></span>
 <span></span>
-<span><span class="co"># Write to h5mu</span></span>
-<span><span class="va">mu</span><span class="op">$</span><span class="fu">write_h5mu</span><span class="op">(</span><span class="va">mdata</span><span class="op">$</span><span class="fu">py_mudata</span><span class="op">(</span><span class="op">)</span>, <span class="st">"/tmp/my_mdata.h5mu"</span><span class="op">)</span></span>
+<span><span class="va">h5mu_path</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/r/base/tempfile.html" class="external-link">tempfile</a></span><span class="op">(</span>fileext <span class="op">=</span> <span class="st">".h5mu"</span><span class="op">)</span></span>
+<span><span class="fu"><a href="https://rdrr.io/r/base/invisible.html" class="external-link">invisible</a></span><span class="op">(</span><span class="va">mu</span><span class="op">$</span><span class="fu">write_h5mu</span><span class="op">(</span><span class="va">h5mu_path</span>, <span class="va">mdata</span><span class="op">$</span><span class="fu">py_mudata</span><span class="op">(</span><span class="op">)</span><span class="op">)</span><span class="op">)</span></span>
 <span></span>
-<span><span class="co"># Read back – returns a Python MuData</span></span>
-<span><span class="va">py_loaded</span>  <span class="op">&lt;-</span> <span class="va">mu</span><span class="op">$</span><span class="fu">read_h5mu</span><span class="op">(</span><span class="st">"/tmp/my_mdata.h5mu"</span><span class="op">)</span></span>
+<span><span class="va">py_loaded</span>  <span class="op">&lt;-</span> <span class="va">mu</span><span class="op">$</span><span class="fu">read_h5mu</span><span class="op">(</span><span class="va">h5mu_path</span><span class="op">)</span></span>
 <span><span class="va">mdata_back</span> <span class="op">&lt;-</span> <span class="va"><a href="../reference/ReticulateMuData.html">ReticulateMuData</a></span><span class="op">$</span><span class="fu">new</span><span class="op">(</span><span class="va">py_loaded</span><span class="op">)</span></span>
 <span></span>
-<span><span class="va">mdata_back</span><span class="op">$</span><span class="va">obs_names</span></span>
-<span><span class="va">mdata_back</span><span class="op">$</span><span class="va">shape</span></span></code></pre></div>
+<span><span class="fu"><a href="https://rdrr.io/r/utils/head.html" class="external-link">head</a></span><span class="op">(</span><span class="va">mdata_back</span><span class="op">$</span><span class="va">obs_names</span>, <span class="fl">4</span><span class="op">)</span></span>
+<span><span class="co">#&gt; [1] "cell_1" "cell_2" "cell_3" "cell_4"</span></span>
+<span><span class="va">mdata_back</span><span class="op">$</span><span class="va">shape</span></span>
+<span><span class="co">#&gt; [1]  300 1040</span></span></code></pre></div>
 <hr>
 </div>
 <div class="section level2">
@@ -556,7 +591,7 @@ any Python function that accepts a <code>MuData</code> via its
 <code class="sourceCode R"><span><span class="fu"><a href="https://rdrr.io/r/utils/sessionInfo.html" class="external-link">sessionInfo</a></span><span class="op">(</span><span class="op">)</span></span>
 <span><span class="co">#&gt; R version 4.5.2 (2025-10-31)</span></span>
 <span><span class="co">#&gt; Platform: x86_64-pc-linux-gnu</span></span>
-<span><span class="co">#&gt; Running under: Ubuntu 24.04.3 LTS</span></span>
+<span><span class="co">#&gt; Running under: Ubuntu 24.04.4 LTS</span></span>
 <span><span class="co">#&gt; </span></span>
 <span><span class="co">#&gt; Matrix products: default</span></span>
 <span><span class="co">#&gt; BLAS:   /usr/lib/x86_64-linux-gnu/openblas-pthread/libblas.so.3 </span></span>
@@ -578,31 +613,51 @@ any Python function that accepts a <code>MuData</code> via its
 <span><span class="co">#&gt; [8] base     </span></span>
 <span><span class="co">#&gt; </span></span>
 <span><span class="co">#&gt; other attached packages:</span></span>
-<span><span class="co">#&gt;  [1] MultiAssayExperiment_1.36.1 Matrix_1.7-4               </span></span>
-<span><span class="co">#&gt;  [3] SingleCellExperiment_1.32.0 SummarizedExperiment_1.40.0</span></span>
-<span><span class="co">#&gt;  [5] Biobase_2.70.0              GenomicRanges_1.62.1       </span></span>
-<span><span class="co">#&gt;  [7] Seqinfo_1.0.0               IRanges_2.44.0             </span></span>
-<span><span class="co">#&gt;  [9] S4Vectors_0.48.0            BiocGenerics_0.56.0        </span></span>
-<span><span class="co">#&gt; [11] generics_0.1.4              MatrixGenerics_1.22.0      </span></span>
-<span><span class="co">#&gt; [13] matrixStats_1.5.0           MofaflexR_0.0.1            </span></span>
-<span><span class="co">#&gt; [15] BiocStyle_2.38.0           </span></span>
+<span><span class="co">#&gt;  [1] ensembldb_2.34.0            AnnotationFilter_1.34.0    </span></span>
+<span><span class="co">#&gt;  [3] GenomicFeatures_1.62.0      AnnotationDbi_1.72.0       </span></span>
+<span><span class="co">#&gt;  [5] scRNAseq_2.24.0             MultiAssayExperiment_1.36.1</span></span>
+<span><span class="co">#&gt;  [7] Matrix_1.7-4                SingleCellExperiment_1.32.0</span></span>
+<span><span class="co">#&gt;  [9] SummarizedExperiment_1.40.0 Biobase_2.70.0             </span></span>
+<span><span class="co">#&gt; [11] GenomicRanges_1.62.1        Seqinfo_1.0.0              </span></span>
+<span><span class="co">#&gt; [13] IRanges_2.44.0              S4Vectors_0.48.0           </span></span>
+<span><span class="co">#&gt; [15] BiocGenerics_0.56.0         generics_0.1.4             </span></span>
+<span><span class="co">#&gt; [17] MatrixGenerics_1.22.0       matrixStats_1.5.0          </span></span>
+<span><span class="co">#&gt; [19] MofaflexR_0.0.1             BiocStyle_2.38.0           </span></span>
 <span><span class="co">#&gt; </span></span>
 <span><span class="co">#&gt; loaded via a namespace (and not attached):</span></span>
-<span><span class="co">#&gt;  [1] sass_0.4.10          SparseArray_1.10.8   lattice_0.22-7      </span></span>
-<span><span class="co">#&gt;  [4] magrittr_2.0.4       digest_0.6.39        evaluate_1.0.5      </span></span>
-<span><span class="co">#&gt;  [7] grid_4.5.2           bookdown_0.46        fastmap_1.2.0       </span></span>
-<span><span class="co">#&gt; [10] jsonlite_2.0.0       BiocManager_1.30.27  purrr_1.2.1         </span></span>
-<span><span class="co">#&gt; [13] anndataR_1.0.2       textshaping_1.0.4    jquerylib_0.1.4     </span></span>
-<span><span class="co">#&gt; [16] abind_1.4-8          cli_3.6.5            rlang_1.1.7         </span></span>
-<span><span class="co">#&gt; [19] XVector_0.50.0       withr_3.0.2          cachem_1.1.0        </span></span>
-<span><span class="co">#&gt; [22] DelayedArray_0.36.0  yaml_2.3.12          BiocBaseUtils_1.12.0</span></span>
-<span><span class="co">#&gt; [25] otel_0.2.0           S4Arrays_1.10.1      tools_4.5.2         </span></span>
-<span><span class="co">#&gt; [28] reticulate_1.45.0    vctrs_0.7.1          R6_2.6.1            </span></span>
-<span><span class="co">#&gt; [31] png_0.1-8            lifecycle_1.0.5      fs_1.6.6            </span></span>
-<span><span class="co">#&gt; [34] htmlwidgets_1.6.4    ragg_1.5.0           desc_1.4.3          </span></span>
-<span><span class="co">#&gt; [37] pkgdown_2.2.0        bslib_0.10.0         Rcpp_1.1.1          </span></span>
-<span><span class="co">#&gt; [40] systemfonts_1.3.1    xfun_0.56            knitr_1.51          </span></span>
-<span><span class="co">#&gt; [43] htmltools_0.5.9      rmarkdown_2.30       compiler_4.5.2</span></span></code></pre></div>
+<span><span class="co">#&gt;  [1] DBI_1.3.0                bitops_1.0-9             httr2_1.2.2             </span></span>
+<span><span class="co">#&gt;  [4] anndataR_1.0.2           rlang_1.1.7              magrittr_2.0.4          </span></span>
+<span><span class="co">#&gt;  [7] otel_0.2.0               gypsum_1.6.0             compiler_4.5.2          </span></span>
+<span><span class="co">#&gt; [10] RSQLite_2.4.6            png_0.1-8                systemfonts_1.3.1       </span></span>
+<span><span class="co">#&gt; [13] vctrs_0.7.1              ProtGenerics_1.42.0      pkgconfig_2.0.3         </span></span>
+<span><span class="co">#&gt; [16] crayon_1.5.3             fastmap_1.2.0            dbplyr_2.5.2            </span></span>
+<span><span class="co">#&gt; [19] XVector_0.50.0           Rsamtools_2.26.0         rmarkdown_2.30          </span></span>
+<span><span class="co">#&gt; [22] UCSC.utils_1.6.1         ragg_1.5.0               purrr_1.2.1             </span></span>
+<span><span class="co">#&gt; [25] bit_4.6.0                xfun_0.56                cachem_1.1.0            </span></span>
+<span><span class="co">#&gt; [28] cigarillo_1.0.0          GenomeInfoDb_1.46.2      jsonlite_2.0.0          </span></span>
+<span><span class="co">#&gt; [31] blob_1.3.0               rhdf5filters_1.22.0      DelayedArray_0.36.0     </span></span>
+<span><span class="co">#&gt; [34] Rhdf5lib_1.32.0          BiocParallel_1.44.0      parallel_4.5.2          </span></span>
+<span><span class="co">#&gt; [37] R6_2.6.1                 bslib_0.10.0             reticulate_1.45.0       </span></span>
+<span><span class="co">#&gt; [40] rtracklayer_1.70.1       jquerylib_0.1.4          Rcpp_1.1.1              </span></span>
+<span><span class="co">#&gt; [43] bookdown_0.46            knitr_1.51               BiocBaseUtils_1.12.0    </span></span>
+<span><span class="co">#&gt; [46] tidyselect_1.2.1         abind_1.4-8              yaml_2.3.12             </span></span>
+<span><span class="co">#&gt; [49] codetools_0.2-20         curl_7.0.0               alabaster.sce_1.10.0    </span></span>
+<span><span class="co">#&gt; [52] lattice_0.22-7           tibble_3.3.1             withr_3.0.2             </span></span>
+<span><span class="co">#&gt; [55] KEGGREST_1.50.0          evaluate_1.0.5           desc_1.4.3              </span></span>
+<span><span class="co">#&gt; [58] BiocFileCache_3.0.0      alabaster.schemas_1.10.0 ExperimentHub_3.0.0     </span></span>
+<span><span class="co">#&gt; [61] Biostrings_2.78.0        pillar_1.11.1            BiocManager_1.30.27     </span></span>
+<span><span class="co">#&gt; [64] filelock_1.0.3           RCurl_1.98-1.17          BiocVersion_3.22.0      </span></span>
+<span><span class="co">#&gt; [67] alabaster.base_1.10.0    alabaster.ranges_1.10.0  glue_1.8.0              </span></span>
+<span><span class="co">#&gt; [70] lazyeval_0.2.2           alabaster.matrix_1.10.0  tools_4.5.2             </span></span>
+<span><span class="co">#&gt; [73] AnnotationHub_4.0.0      BiocIO_1.20.0            GenomicAlignments_1.46.0</span></span>
+<span><span class="co">#&gt; [76] fs_1.6.6                 XML_3.99-0.22            rhdf5_2.54.1            </span></span>
+<span><span class="co">#&gt; [79] grid_4.5.2               HDF5Array_1.38.0         restfulr_0.0.16         </span></span>
+<span><span class="co">#&gt; [82] cli_3.6.5                rappdirs_0.3.4           textshaping_1.0.4       </span></span>
+<span><span class="co">#&gt; [85] S4Arrays_1.10.1          dplyr_1.2.0              alabaster.se_1.10.0     </span></span>
+<span><span class="co">#&gt; [88] sass_0.4.10              digest_0.6.39            SparseArray_1.10.8      </span></span>
+<span><span class="co">#&gt; [91] rjson_0.2.23             htmlwidgets_1.6.4        memoise_2.0.1           </span></span>
+<span><span class="co">#&gt; [94] htmltools_0.5.9          pkgdown_2.2.0            lifecycle_1.0.5         </span></span>
+<span><span class="co">#&gt; [97] h5mread_1.2.1            httr_1.4.8               bit64_4.6.0-1</span></span></code></pre></div>
 </div>
   </main><aside class="col-md-3"><nav id="toc" aria-label="Table of contents"><h2>On this page</h2>
     </nav></aside>
