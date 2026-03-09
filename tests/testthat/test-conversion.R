@@ -53,7 +53,7 @@ make_sce <- function(nr = 30L, nc = 20L, density = 0.3) {
 test_that("sce_assay_to_scipy_csc rejects non-SCE input", {
   expect_error(
     sce_assay_to_scipy_csc(list(), assay = "counts"),
-    regexp = "SingleCellExperiment",
+    regexp = "SummarizedExperiment",
     info   = "Should mention expected class in error message"
   )
 })
@@ -79,14 +79,14 @@ test_that("sce_assay_to_scipy_csc rejects non-character assay argument", {
 test_that("sce_to_anndata rejects non-SCE input", {
   expect_error(
     sce_to_anndata(data.frame(x = 1:3)),
-    regexp = "SingleCellExperiment"
+    regexp = "SummarizedExperiment"
   )
 })
 
 test_that("sce_to_reticulate_anndata rejects non-SCE input", {
   expect_error(
     sce_to_reticulate_anndata("not a sce"),
-    regexp = "SingleCellExperiment"
+    regexp = "SummarizedExperiment"
   )
 })
 

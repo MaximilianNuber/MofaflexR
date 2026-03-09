@@ -8,8 +8,9 @@
 #   * The main SCE becomes the "main_modality" AnnData.
 #   * Every altExp(x, nm) becomes a separate AnnData modality.
 #
-# All matrices are transferred zero-copy (CSC → CSC.T → CSR).
-# No Python ↔ R data conversion occurs for the X matrices.
+# Matrix transfers use se_assay_to_python_matrix(), which dispatches on the
+# assay class (dgCMatrix → CSC, dgRMatrix → CSR, COO → COO, dense → NumPy)
+# and applies zero-copy conversion where the class supports it.
 # ===========================================================================
 
 
@@ -25,7 +26,9 @@
 #' [SingleCellExperiment::altExpNames()]) is mapped to its own modality using
 #' the altExp name as the key.
 #'
-#' All matrix transfers are **zero-copy** (via [sce_assay_to_scipy_csc()]).
+#' Matrix transfers use [se_assay_to_python_matrix()], dispatching by assay
+#' matrix class (dgCMatrix → SciPy CSC, dgRMatrix → CSR, COO → COO, dense
+#' → NumPy array) and applying zero-copy conversion where possible.
 #'
 #' @param x A [SingleCellExperiment::SingleCellExperiment].
 #' @param main_modality Character string; name for the main SCE modality.

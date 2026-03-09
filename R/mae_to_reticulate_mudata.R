@@ -128,15 +128,10 @@ mae_to_reticulate_mudata <- function(mae, assay = NULL, ...) {
     # Accept SE and SCE; warn & skip others
     if (!inherits(exp_obj, "SummarizedExperiment")) {
       warning(sprintf(
-        "Experiment '%s' is not a SummarizedExperiment/SingleCellExperiment ",
-        "(%s); skipping.", nm, paste(class(exp_obj), collapse = ", ")
+        "Experiment '%s' is not a SummarizedExperiment/SingleCellExperiment (%s); skipping.",
+        nm, paste(class(exp_obj), collapse = ", ")
       ))
       next
-    }
-
-    # Coerce to SCE if needed (non-destructively)
-    if (!inherits(exp_obj, "SingleCellExperiment")) {
-      exp_obj <- methods::as(exp_obj, "SingleCellExperiment")
     }
 
     # Determine the assay name for this experiment

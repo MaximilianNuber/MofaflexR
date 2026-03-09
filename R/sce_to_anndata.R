@@ -1,38 +1,42 @@
-#' Convert a SingleCellExperiment to a Python AnnData object
+#' Convert a SummarizedExperiment to a Python AnnData object
 #'
 #' @description
 #' Creates a Python `anndata.AnnData` object from a
-#' [SingleCellExperiment::SingleCellExperiment] using a
-#' `scipy.sparse.csc_matrix` built with [sce_assay_to_scipy_csc()].
+#' [SummarizedExperiment::SummarizedExperiment] (or any subclass, including
+#' [SingleCellExperiment::SingleCellExperiment]).  The main matrix (`X`) is
+#' built by [se_assay_to_python_matrix()], which dispatches to the
+#' appropriate zero-copy NumPy / SciPy converter for the assay's matrix class.
 #'
 #' ## Copy semantics
-#' * **X** (the main count matrix): the dgCMatrix is first converted to a
-#'   `scipy.sparse.csc_matrix` (shape `genes × cells`) via
-#'   [sce_assay_to_scipy_csc()], then transposed to
-#'   `scipy.sparse.csr_matrix` (shape `cells × genes`) by `.T`.  The
-#'   transpose shares all data buffers with the original CSC
-#'   (`flags.owndata = FALSE`), so **no values are copied**.
-#' * **obs / var metadata**: a pandas `DataFrame` is constructed from the R
-#'   `data.frame`; reticulate performs one copy here, which is unavoidable for
-#'   columnar R data frames → row-oriented Python objects.
-#' * **layers / obsm / varm**: passed through as-is; the caller is responsible
-#'   for any copy semantics of those objects.
+#' * **X** (the main count matrix): converted via [se_assay_to_python_matrix()]
+#'   and then transposed (`$T`) for AnnData orientation.  See that function
+#'   for per-class zero-copy details.
+#' * **layers**: each element is converted via
+#'   [.matrix_to_python_array_or_sparse()] if it is an R object, or
+#'   forwarded as-is if it is already a Python object.
+#' * **obsm / varm**: converted via the same dispatcher with
+#'   `prefer_sparse = FALSE` (dense NumPy preferred for embedding matrices);
+#'   already-Python objects are forwarded unchanged.
+#' * **obs / var metadata**: one unavoidable copy per `data.frame` column
+#'   (R columnar → Python row-oriented).
 #'
-#' @param x A [SingleCellExperiment::SingleCellExperiment].
+#' @param x A [SummarizedExperiment::SummarizedExperiment] or subclass.
 #' @param assay A single string: the assay to place in `X` (default
 #'   `"counts"`).
 #' @param obs `NULL` or a `data.frame` of cell-level metadata.  Defaults to
 #'   `as.data.frame(colData(x))` with `rownames` set to `colnames(x)`.
-#' @param var `NULL` or a `data.frame` of gene-level metadata.  Defaults to
-#'   `as.data.frame(rowData(x))` with `rownames` set to `rownames(x)`.
-#' @param layers A named list of additional assay matrices to place in
-#'   `AnnData$layers`.
-#' @param obsm A named list of matrices added to `AnnData$obsm`.
-#' @param varm A named list of matrices added to `AnnData$varm`.
+#' @param var `NULL` or a `data.frame` of feature-level metadata.  Defaults
+#'   to `as.data.frame(rowData(x))` with `rownames` set to `rownames(x)`.
+#' @param layers A named list of additional assay matrices for
+#'   `AnnData$layers`.  Each element may be an R matrix-like object or an
+#'   already-constructed Python object.
+#' @param obsm A named list of matrices for `AnnData$obsm`.
+#' @param varm A named list of matrices for `AnnData$varm`.
 #'
 #' @return A Python `anndata.AnnData` object (reticulate, `convert = FALSE`).
 #'
-#' @seealso [sce_assay_to_scipy_csc()], [sce_to_reticulate_anndata()]
+#' @seealso [se_assay_to_python_matrix()], [sce_assay_to_scipy_csc()],
+#'   [sce_to_reticulate_anndata()]
 #'
 #' @examples
 #' \dontrun{
@@ -55,19 +59,14 @@ sce_to_anndata <- function(
     varm   = list()) {
 
   # ---- validate x ----------------------------------------------------------
-  if (!is(x, "SingleCellExperiment")) {
-    stop(
-      "'x' must be a SingleCellExperiment object, not '",
-      paste(class(x), collapse = "', '"), "'."
-    )
-  }
+  .validate_summarized_experiment(x)
 
-  # ---- build main sparse matrix (zero-copy where possible) -----------------
-  # sce_assay_to_scipy_csc returns csc_matrix with shape (genes, cells).
+  # ---- build main matrix (zero-copy where possible) ------------------------
+  # se_assay_to_python_matrix returns shape (n_features, n_samples).
   # AnnData expects X with shape (obs=cells, vars=genes), so we transpose.
-  # scipy CSC.T yields a CSR matrix sharing the same data buffers (no copy).
-  csc <- sce_assay_to_scipy_csc(x, assay = assay)
-  X   <- csc$T  # csr_matrix shape (n_cells, n_genes), zero-copy
+  # For sparse matrices, .T yields a view sharing all data buffers (no copy).
+  X <- se_assay_to_python_matrix(x, assay = assay, prefer_sparse = TRUE)
+  X <- X$T  # (n_cells, n_genes), zero-copy for sparse; view for dense
 
   # ---- build obs (cell metadata) -------------------------------------------
   if (is.null(obs)) {
@@ -78,10 +77,10 @@ sce_to_anndata <- function(
   }
   obs <- .coerce_df_to_character_rownames(obs, default_prefix = "cell")
 
-  # ---- build var (gene metadata) -------------------------------------------
+  # ---- build var (feature metadata) ----------------------------------------
   if (is.null(var)) {
     var <- as.data.frame(SummarizedExperiment::rowData(x))
-    rownames(var) <- rownames(x)      # ensure gene names are row names
+    rownames(var) <- rownames(x)      # ensure feature names are row names
   } else {
     stopifnot(is.data.frame(var), nrow(var) == nrow(x))
   }
@@ -102,34 +101,56 @@ sce_to_anndata <- function(
     var = py_var
   )
 
-  # ---- optional layers / obsm / varm ---------------------------------------
+  # ---- optional layers -----------------------------------------------------
+  # Each element is dispatched through the matrix converter if it is an R
+  # object, or forwarded as-is if it is already a Python object.
+  # R assay matrices have shape (features, cells); AnnData layers must match
+  # X which is (obs=cells, vars=features), so R objects are transposed.
   if (length(layers) > 0L) {
     if (is.null(names(layers)) || any(names(layers) == "")) {
       stop("'layers' must be a *named* list.")
     }
     for (nm in names(layers)) {
-      # Use __setitem__ to mutate the Python Layers mapping in-place.
-      # R's `[[<-` on a nested Python attribute does not reliably propagate
-      # back through reticulate's attribute proxy chain.
-      py_adata$layers$`__setitem__`(nm, reticulate::r_to_py(layers[[nm]]))
+      mat_py <- if (.is_python_object(layers[[nm]])) {
+        layers[[nm]]   # already Python: caller controls orientation
+      } else {
+        # Use __setitem__ to mutate the Python Layers mapping in-place.
+        # R's `[[<-` on a nested Python attribute does not reliably propagate
+        # back through reticulate's attribute proxy chain.
+        .matrix_to_python_array_or_sparse(layers[[nm]], prefer_sparse = TRUE)$T
+      }
+      py_adata$layers$`__setitem__`(nm, mat_py)
     }
   }
 
+  # ---- optional obsm -------------------------------------------------------
+  # Embeddings / coordinates are typically dense; prefer_sparse = FALSE.
   if (length(obsm) > 0L) {
     if (is.null(names(obsm)) || any(names(obsm) == "")) {
       stop("'obsm' must be a *named* list.")
     }
     for (nm in names(obsm)) {
-      py_adata$obsm$`__setitem__`(nm, reticulate::r_to_py(obsm[[nm]]))
+      mat_py <- if (.is_python_object(obsm[[nm]])) {
+        obsm[[nm]]
+      } else {
+        .matrix_to_python_array_or_sparse(obsm[[nm]], prefer_sparse = FALSE)
+      }
+      py_adata$obsm$`__setitem__`(nm, mat_py)
     }
   }
 
+  # ---- optional varm -------------------------------------------------------
   if (length(varm) > 0L) {
     if (is.null(names(varm)) || any(names(varm) == "")) {
       stop("'varm' must be a *named* list.")
     }
     for (nm in names(varm)) {
-      py_adata$varm$`__setitem__`(nm, reticulate::r_to_py(varm[[nm]]))
+      mat_py <- if (.is_python_object(varm[[nm]])) {
+        varm[[nm]]
+      } else {
+        .matrix_to_python_array_or_sparse(varm[[nm]], prefer_sparse = FALSE)
+      }
+      py_adata$varm$`__setitem__`(nm, mat_py)
     }
   }
 

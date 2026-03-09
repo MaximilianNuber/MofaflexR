@@ -27,9 +27,11 @@ knitr::opts_chunk$set(
 
 # Introduction
 
-**MofaflexR** provides zero-copy bridges between Bioconductor single-cell
-objects and the Python `mudata` / `anndata` ecosystem. This vignette
-demonstrates:
+**MofaflexR** provides matrix-aware bridges between Bioconductor
+single-cell objects and the Python `mudata` / `anndata` ecosystem.  Common
+dense and sparse assay matrix types are converted to NumPy arrays or SciPy
+sparse matrices, as appropriate, and zero-copy is used where possible for
+supported representations.  This vignette demonstrates:
 
 1. **`sce_to_reticulate_mudata()`**: Convert a
    `SingleCellExperiment` – with alternative experiments (altExps) encoding
@@ -42,9 +44,13 @@ demonstrates:
 3. **`ReticulateMuData` active bindings and methods**: Access Python MuData
    fields directly from R without any data copies.
 
-All matrix transfers are **zero-copy**: R `dgCMatrix` objects are shared with
-Python through `scipy.sparse.csc_matrix` pointers. No Python ↔ R
-serialisation takes place unless you explicitly call `reticulate::py_to_r()`.
+Matrix transfers use the same dispatch machinery as `sce_to_anndata()`: each
+modality's assay is routed to the appropriate converter based on its class
+(`dgCMatrix` → `csc_matrix`, `dgRMatrix` → `csr_matrix`, `dgeMatrix` /
+base `matrix` → `ndarray`, `COO_SparseMatrix` → `coo_matrix`).  For the
+sparse formats used in typical single-cell count matrices, zero-copy is used
+for the backing slot arrays.  No Python ↔ R serialisation takes place unless
+you explicitly call `reticulate::py_to_r()`.
 
 ## Prerequisites
 
@@ -71,7 +77,10 @@ suppressPackageStartupMessages({
 # Synthetic CITE-seq Dataset
 
 We construct a minimal **CITE-seq** dataset that faithfully mimics real
-single-cell data: 300 cells, 1 000 genes (RNA), and 40 surface proteins (ADT).
+single-cell data: 300 cells, 1 000 genes (RNA), and 40 surface proteins (ADT).
+Both RNA and ADT are represented as sparse `dgCMatrix` objects, which is typical
+for single-cell count data.  The same conversion machinery also handles
+dense assay matrices (e.g. `dgeMatrix`, base `matrix`).
 
 ```{r synthetic-data}
 set.seed(42)
@@ -151,8 +160,12 @@ cat("ADT dimensions       : ", dim(altExp(sce, "adt")), "\n")
 ## Convert with `sce_to_reticulate_mudata()`
 
 `sce_to_reticulate_mudata()` maps the main SCE to one modality and each
-`altExp` to its own modality. The conversion is **zero-copy**: all sparse
-matrices remain in their original R memory locations.
+`altExp` to its own modality.  Each modality's assay is converted
+independently using the same matrix-aware dispatch as `sce_to_anndata()`:
+for sparse count matrices stored in a supported format (e.g. `dgCMatrix`),
+zero-copy is used for the underlying data arrays; dense matrices are
+converted to NumPy arrays via the buffer protocol.  The resulting Python
+objects share memory with R for the duration of the session.
 
 ```{r sce-to-mudata}
 mdata <- sce_to_reticulate_mudata(
@@ -353,63 +366,68 @@ cat("ADT modality: ", adt_from_mae$n_obs(), "obs x", adt_from_mae$n_vars(), "var
 
 ---
 
-# Real Dataset Examples (Optional)
+# Real Dataset Examples
 
-The demonstrations above use synthetic data so the vignette renders offline
-and instantly.  For a real CITE-seq workflow, replace the synthetic setup with
-any SCE that has an ADT altExp.  Below is a sketch using the `scRNAseq`
-package:
+The sections above use synthetic data so the vignette can be rendered
+offline.  The following examples run the same bridge on real datasets.
 
-```{r real-dataset, eval = FALSE}
-# ---- Using a real scRNAseq dataset ----------------------------------------
-# Many scRNAseq datasets include altExps for spike-ins or protein panels.
-# Example: Zilionis et al. mouse lung data (has ercc altExp)
-#
-# library(scRNAseq)
-# sce_lung <- ZilionisLungData("mouse")
-# altExpNames(sce_lung)   # check for altExps
-#
-# # Convert to MuData (use first assay of each altExp automatically)
-# mdata_lung <- sce_to_reticulate_mudata(
-#   x             = sce_lung,
-#   main_modality = "rna",
-#   assay         = "counts"
-# )
-# mdata_lung
+## SCE with altExps: Buettner et al. ESC data
+
+`BuettnerESCData()` from the `scRNAseq` package provides 288 mouse
+embryonic stem cells with ERCC spike-in counts stored in an `altExp`.
+This is a compact real dataset that exercises the multi-modality path.
+
+```{r real-dataset}
+library(scRNAseq)
+
+sce_buettner <- BuettnerESCData()
+altExpNames(sce_buettner)   # "ERCC"
+
+mdata_buettner <- sce_to_reticulate_mudata(
+  x             = sce_buettner,
+  main_modality = "rna",
+  assay         = "counts"
+)
+mdata_buettner$modality_names()   # "rna" and "ERCC"
+mdata_buettner$shape
 ```
 
-For a `MultiAssayExperiment` from a real experiment:
+## MultiAssayExperiment: ACC data
 
-```{r mae-real, eval = FALSE}
-# ---- Using a MultiAssayExperiment from curatedTCGAData --------------------
-# library(curatedTCGAData)
-# mae_brca <- curatedTCGAData("BRCA",
-#                             assays = c("RNASeq2GeneNorm", "miRNASeqGene"),
-#                             dry.run = FALSE)
-#
-# mdata_brca <- mae_to_reticulate_mudata(mae_brca)
-# mdata_brca$modality_names()
+`miniACC` ships with the `MultiAssayExperiment` package and contains five
+assays from an adrenocortical carcinoma study.  `Mutations` (plain `matrix`)
+is skipped because it is not a `SummarizedExperiment`; `gistict` is skipped
+because its assay is unnamed.  The remaining three SE assays are converted
+normally.
+
+```{r mae-real}
+data(miniACC)
+names(experiments(miniACC))
+
+mdata_acc <- mae_to_reticulate_mudata(miniACC)
+mdata_acc$modality_names()
+mdata_acc$n_obs()
 ```
 
 ---
 
 # Interoperability Round-trip
 
-The `ReticulateMuData` object can be passed directly to any Python function
-that accepts a `MuData` via its `.py_mudata()` raw accessor:
+A `ReticulateMuData` wraps a live Python `MuData` object.  The raw Python
+object is accessible via `$py_mudata()` and can be passed to any Python
+code in the mudata ecosystem.  Here we write `mdata` (the synthetic
+CITE-seq object from earlier) to HDF5 and read it back.
 
-```{r py-round-trip, eval = FALSE}
-# ---- Pass directly to Python code -----------------------------------------
+```{r py-round-trip}
 mu <- reticulate::import("mudata", convert = FALSE)
 
-# Write to h5mu
-mu$write_h5mu(mdata$py_mudata(), "/tmp/my_mdata.h5mu")
+h5mu_path <- tempfile(fileext = ".h5mu")
+invisible(mu$write_h5mu(h5mu_path, mdata$py_mudata()))
 
-# Read back – returns a Python MuData
-py_loaded  <- mu$read_h5mu("/tmp/my_mdata.h5mu")
+py_loaded  <- mu$read_h5mu(h5mu_path)
 mdata_back <- ReticulateMuData$new(py_loaded)
 
-mdata_back$obs_names
+head(mdata_back$obs_names, 4)
 mdata_back$shape
 ```
 

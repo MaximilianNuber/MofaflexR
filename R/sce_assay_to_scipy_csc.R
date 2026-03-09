@@ -68,9 +68,9 @@
 #' @export
 sce_assay_to_scipy_csc <- function(x, assay = "counts") {
   # ---- input validation ----------------------------------------------------
-  if (!is(x, "SingleCellExperiment")) {
+  if (!is(x, "SummarizedExperiment")) {
     stop(
-      "'x' must be a SingleCellExperiment object, not '",
+      "'x' must be a SummarizedExperiment (or subclass), not '",
       paste(class(x), collapse = "', '"), "'."
     )
   }

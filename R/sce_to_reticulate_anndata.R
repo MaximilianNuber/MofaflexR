@@ -43,9 +43,11 @@
 #' @export
 sce_to_reticulate_anndata <- function(x, assay = "counts", ...) {
   # ---- validate x ----------------------------------------------------------
-  if (!is(x, "SingleCellExperiment")) {
+  # Validation is also performed inside sce_to_anndata(); this early check
+  # provides a cleaner call stack in error messages.
+  if (!is(x, "SummarizedExperiment")) {
     stop(
-      "'x' must be a SingleCellExperiment object, not '",
+      "'x' must be a SummarizedExperiment (or subclass), not '",
       paste(class(x), collapse = "', '"), "'."
     )
   }
